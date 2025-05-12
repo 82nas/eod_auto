@@ -15,9 +15,11 @@ class OllamaBackend(AIBaseBackend):
         self.base_url = config.get("ollama_base_url", os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
         # Check Ollama availability at init
         try:
+            # Use HEAD request for quick check without transferring body
             response = requests.head(self.base_url, timeout=5)
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
+            # Provide more specific error guidance
             if isinstance(e, requests.exceptions.ConnectionError):
                 raise ConnectionError(f"Ollama 서버({self.base_url}) 연결 실패. Ollama가 실행 중인지, URL이 정확한지 확인하세요.") from e
             else:
@@ -46,23 +48,24 @@ class OllamaBackend(AIBaseBackend):
                         {"role": "system", "content": sys_msg},
                         {"role": "user", "content": user_msg}
                     ],
-                    "options": {"temperature": 0, "num_ctx": 4096},
+                    "options": {"temperature": 0, "num_ctx": 4096}, # Consistent results
                     "stream": False
                 },
                 timeout=180
             )
-            response.raise_for_status()
+            response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
             return response.json()["message"]["content"].strip()
         except requests.exceptions.ConnectionError as e:
             raise RuntimeError(f"Ollama API 연결 실패 ({self.base_url}): {e}") from e
         except requests.exceptions.Timeout as e:
             raise RuntimeError(f"Ollama API 응답 시간 초과: {e}") from e
-        except requests.exceptions.RequestException as e:
+        except requests.exceptions.RequestException as e: # Catch other request errors (like HTTPError)
             err_msg = f"Ollama API 요청 실패: {e}"
             if e.response is not None:
-                err_msg += f"\n상태 코드: {e.response.status_code}\n응답: {e.response.text[:500]}"
+                err_msg += f"\n상태 코드: {e.response.status_code}\n응답: {e.response.text[:500]}" # Show partial response
             raise RuntimeError(err_msg) from e
         except (KeyError, IndexError, json.JSONDecodeError) as e:
+            # Handle cases where response structure is not as expected
             raise RuntimeError(f"Ollama API 응답 처리 오류 (예상치 못한 형식): {e}") from e
 
     def make_summary(self, task: str, ctx: str, arts: List[str]) -> str:
@@ -115,10 +118,16 @@ class OllamaBackend(AIBaseBackend):
         * 파일 경로, 추가 설명, bullet point 등 다른 내용은 **절대 포함하지 마십시오.**
 
         ---
-        **4. 금지 사항 (엄격히 준수):**
-        * **어떤 경우에도** 표, 코드 블록(```), 인라인 코드(`), 이미지, HTML 태그 등 기본 Markdown(위에 명시된 헤더, bullet point, 쉼표 구분 목록)을 벗어난 그 어떤 확장 문법도 사용을 **금지**합니다.
-        * 이것은 인수인계 문서의 표준 형식을 유지하기 위함입니다.
-
+        **4. ✨✨절대적인 금지 사항 (매우 중요! 반드시 숙지하고 생성하세요!)✨✨:**
+        * **어떤 경우에도** 다음 요소들의 사용을 **엄격히 금지**합니다. 이 규칙을 어기면 결과물은 실패로 간주됩니다:
+            * 표 (Tables)
+            * 코드 블록 (``` ... ```) - 이 `make_summary` 작업에서는 코드 블록도 절대 허용되지 않습니다.
+            * **인라인 코드 (` `) - 예시: `변수명`, `my_file.py`, `some_function()` 와 같이 백틱으로 감싸는 형식은 절대 금지입니다! 기술 용어나 파일 이름도 일반 텍스트로만 작성하세요.**
+            * 이미지 (![alt](url))
+            * HTML 태그 (<p>, <b>, <span> 등)
+            * **Markdown 체크박스 (`[ ]` 또는 `[x]`) - 할 일 목록은 일반 bullet point (`-`)와 텍스트로만 작성해야 합니다. `[ ]` 형식은 절대 사용하지 마세요.**
+        * 이 지침은 인수인계 문서의 표준성과 단순성을 유지하기 위함입니다. 오직 위에 명시된 헤더 형식, bullet point (`- `), 그리고 `## 산출물` 섹션의 쉼표 구분 파일 목록만 허용됩니다.
+        * **특히 '## 다음할일' 섹션 작성 시 주의:** 각 할 일은 `- 일반 텍스트로 된 할 일 설명입니다.` 와 같이 **순수 텍스트**로만 작성하고, 절대로 Markdown 특수 문자(백틱, 대괄호, #, *, _ 등)를 내용에 포함시키지 마십시오. 예를 들어, 파일명을 언급해야 한다면 `ollama.py 파일 수정`이 아니라 `ollama 점 py 파일 수정` 과 같이 하거나, 단순히 `ollama 파일 수정`으로 작성하세요.
         ---
         **5. 언어:**
         * 모든 내용은 한국어로 작성합니다. (단, 파일명이나 코드에서 유래한 고유명사는 원본 그대로 사용 가능)
@@ -138,8 +147,8 @@ class OllamaBackend(AIBaseBackend):
 
         ---
         ### **요청: Markdown 출력**
-        위의 **모든 지침과 규칙, 특히 절대적인 헤더 구조 규칙(1-1, 1-2)을 철저히 준수하여** 인수인계 문서를 Markdown 형식으로 생성해주십시오.
-        생성된 문서의 첫 번째 줄이 정확히 `# {task}` 형식인지 스스로 다시 한번 확인하고 출력해주십시오.
+        위의 **모든 지침과 규칙, 특히 절대적인 헤더 구조 규칙(1-1, 1-2)과 금지 사항 규칙(4)을 철저히 준수하여** 인수인계 문서를 Markdown 형식으로 생성해주십시오.
+        생성된 문서의 첫 번째 줄이 정확히 `# {task}` 형식인지 스스로 다시 한번 확인하고 출력해주십시오. 또한, 금지된 Markdown 요소가 포함되지 않았는지 반드시 확인해주십시오.
         """)
         return self._req(sys_msg, user_msg)
 
@@ -167,13 +176,14 @@ class OllamaBackend(AIBaseBackend):
         """)
         res = self._req(sys_msg, user_msg)
         
-        if not res:
+        if not res: # AI 응답이 아예 없는 경우
             return False, f"AI 검증 응답 없음 ({self.get_name()})"
 
         stripped_res_upper = res.strip().upper()
+        # 응답의 시작 부분이 "**OK**" 또는 "OK"이면 성공으로 간주
         is_ok = stripped_res_upper.startswith("**OK**") or stripped_res_upper.startswith("OK")
         
-        return is_ok, res
+        return is_ok, res # 원래 메시지(res)는 그대로 반환
 
     def load_report(self, md: str) -> str:
         sys_msg = textwrap.dedent("""
