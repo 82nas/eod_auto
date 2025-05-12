@@ -1,5 +1,6 @@
 # backends/ollama.py
 import os
+import re  # 정규표현식 모듈 임포트
 import requests
 import textwrap
 import json # For potential JSONDecodeError
@@ -15,11 +16,9 @@ class OllamaBackend(AIBaseBackend):
         self.base_url = config.get("ollama_base_url", os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
         # Check Ollama availability at init
         try:
-            # Use HEAD request for quick check without transferring body
             response = requests.head(self.base_url, timeout=5)
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
-            # Provide more specific error guidance
             if isinstance(e, requests.exceptions.ConnectionError):
                 raise ConnectionError(f"Ollama 서버({self.base_url}) 연결 실패. Ollama가 실행 중인지, URL이 정확한지 확인하세요.") from e
             else:
@@ -48,61 +47,51 @@ class OllamaBackend(AIBaseBackend):
                         {"role": "system", "content": sys_msg},
                         {"role": "user", "content": user_msg}
                     ],
-                    "options": {"temperature": 0, "num_ctx": 4096}, # Consistent results
+                    "options": {"temperature": 0, "num_ctx": 4096},
                     "stream": False
                 },
                 timeout=180
             )
-            response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+            response.raise_for_status()
 
-            # --- Improved Response Parsing ---
             response_data = response.json()
-            # Check if 'message' key and its 'content' key exist before accessing
             message_data = response_data.get("message")
             if isinstance(message_data, dict):
                  message_content = message_data.get("content", "")
             else:
-                 # Handle cases where 'message' might not be a dict or is missing
-                 # Log a warning or raise a more specific error if needed
-                 # For now, default to empty string if structure is unexpected
                  print(f"Warning: Unexpected 'message' structure in Ollama response: {message_data}")
                  message_content = ""
-            # --- End Improved Response Parsing ---
 
             return message_content.strip()
 
         except requests.exceptions.ConnectionError as e:
             raise RuntimeError(f"Ollama API 연결 실패 ({self.base_url}): {e}") from e
         except requests.exceptions.Timeout as e:
-            # Include model name in timeout error
             raise RuntimeError(f"Ollama API 응답 시간 초과 (모델: {self.model}): {e}") from e
-        except requests.exceptions.RequestException as e: # Catch other request errors (like HTTPError)
-            # Include model name and provide more response details
+        except requests.exceptions.RequestException as e:
             err_msg = f"Ollama API 요청 실패 (모델: {self.model}): {e}"
             if e.response is not None:
                 try:
-                    # Attempt to parse JSON error, fallback to text
                     err_details = e.response.json()
                     err_msg += f"\n상태 코드: {e.response.status_code}\n오류: {err_details.get('error', e.response.text[:500])}"
                 except json.JSONDecodeError:
                      err_msg += f"\n상태 코드: {e.response.status_code}\n응답 (텍스트): {e.response.text[:500]}"
             raise RuntimeError(err_msg) from e
         except (KeyError, IndexError, TypeError, json.JSONDecodeError) as e:
-             # Improve error message for unexpected response structure
              response_text_snippet = "응답 내용 확인 불가"
-             # Check if 'response' exists and has 'text' attribute before accessing
              if 'response' in locals() and hasattr(response, 'text'):
-                 response_text_snippet = response.text[:1000] # Show larger snippet
+                 response_text_snippet = response.text[:1000]
              raise RuntimeError(f"Ollama API 응답 처리 오류 (모델: {self.model}, 예상치 못한 형식): {e}\n받은 응답 미리보기: {response_text_snippet}") from e
 
     def make_summary(self, task: str, ctx: str, arts: List[str]) -> str:
-        # Using the very strict prompt from the original example
+        # 프롬프트는 이전 버전 유지 (규칙의 엄격함 강조)
         sys_msg = textwrap.dedent("""
         당신은 한국어로 프로젝트 인수인계 문서를 작성하는 매우 정확하고 꼼꼼한 시니어 개발자입니다.
         주어진 모든 규칙을 **단 하나도 빠짐없이, 글자 그대로 정확하게** 준수하여 Markdown 형식으로 문서를 생성해야 합니다.
         특히 헤더의 레벨과 형식, bullet point의 개수, 금지된 마크다운 요소 미사용이 매우 중요합니다.
         이 문서는 다른 동료가 현재 상황을 즉시 파악하고 작업을 이어받는 데 사용됩니다.
         """)
+        # User message 내용 중 arts 처리 부분은 `{', '.join(arts) if arts else '없음'}` 그대로 유지
         user_msg = textwrap.dedent(f"""
         ### **매우 중요한 작성 지침 (반드시, 반드시 엄수!)**
 
@@ -185,7 +174,7 @@ class OllamaBackend(AIBaseBackend):
             {ctx or '제공된 내용 없음'}
             ```
 
-        * **현재 작업 산출물 목록 (`## 산출물` 섹션에 사용될 내용):** `{', '.join(arts) if arts else '없음'}`
+        * **현재 작업 산출물 목록 (`## 산출물` 섹션에 사용될 내용):** `{', '.join(arts) if arts else '없음'}` # 이 부분은 호출 시 arts=[] 를 받으면 '없음'으로 잘 처리됨
 
         ---
         ### **요청: Markdown 출력**
@@ -195,7 +184,7 @@ class OllamaBackend(AIBaseBackend):
         return self._req(sys_msg, user_msg)
 
     def verify_summary(self, md: str) -> Tuple[bool, str]:
-        # Using the strict prompt from the original example
+        # 프롬프트는 이전 버전 유지 (엄격한 결과 보고 요구)
         sys_msg = textwrap.dedent("""
         당신은 Markdown 문서 형식을 검증하는 매우 꼼꼼한 검토자입니다.
         주어진 Markdown 텍스트가 아래 규칙을 모두 준수하는지 확인하고 결과를 보고합니다.
@@ -224,16 +213,24 @@ class OllamaBackend(AIBaseBackend):
         if not res: # AI 응답이 아예 없는 경우
             return False, f"AI 검증 응답 없음 ({self.get_name()})"
 
-        # --- HuggingFace 스타일의 간결한 확인 로직 ---
-        stripped_res_upper = res.strip().upper()
-        # 응답의 시작 부분이 "**OK**" 또는 "OK"이면 성공으로 간주
-        is_ok = stripped_res_upper.startswith("**OK**") or stripped_res_upper.startswith("OK")
-        # --- 수정된 로직 끝 ---
+        # --- 제안된 단순화된 검증 로직 (re 사용) ---
+        res_up = res.upper() # 비교를 위해 대문자 변환
 
-        return is_ok, res # 원래 메시지(res)는 그대로 반환
+        # 'OK' 단어가 존재하는지 확인 (단어 경계 \b 사용)
+        ok_token   = bool(re.search(r"\bOK\b", res_up))
+
+        # 부정적 키워드나 심볼이 있는지 확인
+        # ❌, NG(단어), FAIL, ERROR, 문제(텍스트)
+        bad_token  = bool(re.search(r"(❌|NG\b|FAIL|ERROR|문제)", res_up))
+
+        # OK 토큰이 있고, 부정 토큰이 없어야 성공
+        is_ok = ok_token and not bad_token
+        # --- 검증 로직 끝 ---
+
+        return is_ok, res # 원래 AI 응답(res)은 디버깅 등을 위해 그대로 반환
 
     def load_report(self, md: str) -> str:
-        # Using the original prompt
+        # 프롬프트는 이전 버전 유지
         sys_msg = textwrap.dedent("""
         당신은 동료로부터 프로젝트 상태 보고서를 전달받아 내용을 파악해야 하는 개발자입니다.
         주어진 Markdown 보고서를 주의 깊게 읽고, 이해한 내용을 바탕으로 현재 상황과 즉시 해야 할 일을 요약해주세요.
