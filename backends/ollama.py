@@ -1,4 +1,4 @@
-#ollama.py
+# ollama.py
 import os
 import requests
 import textwrap
