@@ -1,11 +1,11 @@
 # backends/ollama.py
 import os
-import re  # 정규표현식 모듈 임포트
+import re
 import requests
 import textwrap
-import json # For potential JSONDecodeError
+import json
 from typing import List, Tuple, Dict, Any
-from .base import AIBaseBackend # Use relative import
+from .base import AIBaseBackend
 
 class OllamaBackend(AIBaseBackend):
     """AI Backend implementation for Ollama."""
@@ -14,7 +14,6 @@ class OllamaBackend(AIBaseBackend):
         super().__init__(config)
         self.model = config.get("model", os.getenv("AI_MODEL", "llama3"))
         self.base_url = config.get("ollama_base_url", os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
-        # Check Ollama availability at init
         try:
             response = requests.head(self.base_url, timeout=5)
             response.raise_for_status()
@@ -84,15 +83,14 @@ class OllamaBackend(AIBaseBackend):
              raise RuntimeError(f"Ollama API 응답 처리 오류 (모델: {self.model}, 예상치 못한 형식): {e}\n받은 응답 미리보기: {response_text_snippet}") from e
 
     def make_summary(self, task: str, ctx: str, arts: List[str]) -> str:
-        # 프롬프트는 이전 버전 유지 (규칙의 엄격함 강조)
-        # 여기에 user_msg 마지막에 지침 복사 방지 경고를 추가하는 것을 고려할 수 있습니다.
-        # 예: user_msg += "\n\n⚠️ 중요: 위의 지침 내용은 최종 Markdown 출력에 포함하지 마십시오."
+        # System Message는 변경 없음
         sys_msg = textwrap.dedent("""
         당신은 한국어로 프로젝트 인수인계 문서를 작성하는 매우 정확하고 꼼꼼한 시니어 개발자입니다.
         주어진 모든 규칙을 **단 하나도 빠짐없이, 글자 그대로 정확하게** 준수하여 Markdown 형식으로 문서를 생성해야 합니다.
         특히 헤더의 레벨과 형식, bullet point의 개수, 금지된 마크다운 요소 미사용이 매우 중요합니다.
         이 문서는 다른 동료가 현재 상황을 즉시 파악하고 작업을 이어받는 데 사용됩니다.
         """)
+        # User Message에서 '목표' -> '목표 이름' 으로 변경
         user_msg = textwrap.dedent(f"""
         ### **매우 중요한 작성 지침 (반드시, 반드시 엄수!)**
 
@@ -110,13 +108,13 @@ class OllamaBackend(AIBaseBackend):
             * **경고: 절대로 `## {task}` 또는 `### {task}` 와 같이 `#`을 두 개 이상 사용해서는 안 됩니다.** 오직 `#` 하나만 사용해야 합니다.
 
         * **1-2. 하위 섹션 헤더:**
-            * 나머지 6개 섹션(목표, 진행, 결정, 결과, 다음할일, 산출물)은 **반드시 `## 섹션이름` 형식이어야 합니다.** (예시: `## 목표`, `## 진행`)
+            * 나머지 6개 섹션(**목표 이름**, 진행, 결정, 결과, 다음할일, 산출물)은 **반드시 `## 섹션이름` 형식이어야 합니다.** (예시: `## 목표 이름`, `## 진행`) # <-- '목표' -> '목표 이름' 수정됨
             * 이것은 **정확히 두 개의 `##` 심볼**과 한 칸의 공백, 그리고 정해진 섹션 이름으로 구성됩니다.
 
         **올바른 전체 헤더 구조 예시 (이 구조를 반드시 따르세요):**
         ```markdown
         # {task}
-        ## 목표
+        ## 목표 이름          # <-- '목표' -> '목표 이름' 수정됨
         ## 진행
         ## 결정
         ## 결과
@@ -180,20 +178,21 @@ class OllamaBackend(AIBaseBackend):
         ---
         ### **요청: Markdown 출력**
         위의 **모든 지침과 규칙, 특히 절대적인 헤더 구조 규칙(1-1, 1-2), bullet point 개수 규칙(2), 산출물 형식 규칙(3), 금지 사항 규칙(4), 그리고 언어 규칙(5)을 철저히 준수하여** 인수인계 문서를 Markdown 형식으로 생성해주십시오.
-        생성된 문서의 첫 번째 줄이 정확히 `# {task}` 형식인지, 각 ## 섹션의 bullet point 개수가 2개에서 5개 사이인지, 금지된 Markdown 요소(특히 백틱)나 불필요한 영어가 포함되지 않았는지 스스로 다시 한번 확인하고 출력해주십시오.
+        생성된 문서의 첫 번째 줄이 정확히 `# {task}` 형식인지, 두 번째 헤더가 `## 목표 이름`인지, 각 ## 섹션의 bullet point 개수가 2개에서 5개 사이인지, 금지된 Markdown 요소(특히 백틱)나 불필요한 영어가 포함되지 않았는지 스스로 다시 한번 확인하고 출력해주십시오. # <-- '## 목표 이름' 확인 추가
         ⚠️ **경고: 이 지침 섹션들(### 매우 중요한..., ### 입력 정보, ### 요청: ...) 자체를 최종 Markdown 출력에 절대로 포함하지 마십시오. 오직 `# {task}` 로 시작하는 인수인계 문서 내용만 생성해야 합니다.**
-        """) # 지침 복사 방지 경고 추가 (체크리스트 3번 항목 반영)
+        """)
         return self._req(sys_msg, user_msg)
 
     def verify_summary(self, md: str) -> Tuple[bool, str]:
-        # 프롬프트는 이전 버전 유지 (엄격한 결과 보고 요구)
+        # System Message는 변경 없음
         sys_msg = textwrap.dedent("""
         당신은 Markdown 문서 형식을 검증하는 매우 꼼꼼한 검토자입니다.
         주어진 Markdown 텍스트가 아래 규칙을 모두 준수하는지 확인하고 결과를 보고합니다.
         """)
+        # User Message에서 검증 규칙의 헤더 목록도 '## 목표 이름'으로 변경
         user_msg = textwrap.dedent(f"""
         ### 검증 규칙
-        1.  **필수 헤더 및 순서:** 다음 7개 헤더가 정확한 순서와 레벨(# 또는 ##)로 존재하는가? (`# 작업이름`, `## 목표`, `## 진행`, `## 결정`, `## 결과`, `## 다음할일`, `## 산출물`) - '# 작업이름' 부분은 실제 작업 이름으로 대체될 수 있음.
+        1.  **필수 헤더 및 순서:** 다음 7개 헤더가 정확한 순서와 레벨(# 또는 ##)로 존재하는가? (`# 작업이름`, `## 목표 이름`, `## 진행`, `## 결정`, `## 결과`, `## 다음할일`, `## 산출물`) - '# 작업이름' 부분은 실제 작업 이름으로 대체될 수 있음. # <-- '목표' -> '목표 이름' 수정됨
         2.  **Bullet Point 개수:** `## 산출물` 섹션을 제외한 각 `##` 섹션의 bullet point (`- `) 개수가 2개 이상 5개 이하인가? (0개도 허용 안됨. 내용 없을 시 '- 없음.'과 같이 2개 이상으로 맞춰야 함)
         3.  **산출물 형식:** `## 산출물` 섹션에는 (a) 파일 이름들이 쉼표로만 구분되어 나열되어 있거나, (b) **오직 '없음'이라는 두 글자만 정확히 있어야 합니다.** (a)의 경우 bullet point, 경로, 설명 등은 금지됩니다. (b)의 경우 '없음' 외 다른 어떤 텍스트도 없어야 합니다. '없음'이라고 적힌 경우 '설명 포함됨'으로 간주하지 마십시오.
         4.  **금지 요소:** 표, 코드 블록(```), 인라인 코드(`), 이미지, HTML 태그 등 금지된 요소가 포함되지 않았는가?
@@ -212,27 +211,19 @@ class OllamaBackend(AIBaseBackend):
         """)
         res = self._req(sys_msg, user_msg)
 
-        if not res: # AI 응답이 아예 없는 경우
+        if not res:
             return False, f"AI 검증 응답 없음 ({self.get_name()})"
 
-        # --- 최종 단순화된 검증 로직 (re 사용) ---
-        up = res.upper() # 비교를 위해 대문자 변환
-
-        # 'OK' 단어가 존재하는지 확인 (단어 경계 \b 사용)
+        # 최종 단순화된 검증 로직 (re 사용) - 변경 없음
+        up = res.upper()
         ok  = bool(re.search(r"\bOK\b", up))
-
-        # 부정적 키워드나 심볼이 있는지 확인 (문제점, PROBLEM 추가)
-        # ❌, NG(단어), FAIL, ERROR, 문제점(텍스트), PROBLEM(단어)
         bad = bool(re.search(r"(❌|NG\b|FAIL|ERROR|문제점|PROBLEM)", up))
-
-        # OK 토큰이 있고, 부정 토큰이 없어야 성공
         is_ok = ok and not bad
-        # --- 검증 로직 끝 ---
 
-        return is_ok, res # 원래 AI 응답(res)은 디버깅 등을 위해 그대로 반환
+        return is_ok, res
 
     def load_report(self, md: str) -> str:
-        # 프롬프트는 이전 버전 유지
+        # 변경 없음
         sys_msg = textwrap.dedent("""
         당신은 동료로부터 프로젝트 상태 보고서를 전달받아 내용을 파악해야 하는 개발자입니다.
         주어진 Markdown 보고서를 주의 깊게 읽고, 이해한 내용을 바탕으로 현재 상황과 즉시 해야 할 일을 요약해주세요.
