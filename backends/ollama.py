@@ -117,7 +117,7 @@ class OllamaBackend(AIBaseBackend):
             return False, "AI 검증 응답 없음"
 
         up = res.upper()
-        ok_token = bool(re.search(r"\bOK\b", up))
+        ok_token = bool(re.search(r"\bOK(?:[.!: ]|\b)", up))
         bad_token = bool(re.search(r"(❌|NG\b|FAIL|ERROR|문제점|PROBLEM)", up))
         return ok_token and not bad_token, res
 
