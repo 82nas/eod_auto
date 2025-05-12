@@ -2,6 +2,7 @@
 from abc import ABC, abstractmethod
 from typing import List, Tuple, Dict, Any
 
+
 class AIBaseBackend(ABC):
     """Abstract Base Class for AI backend implementations."""
 
@@ -29,10 +30,10 @@ class AIBaseBackend(ABC):
     @staticmethod
     def get_config_description() -> str:
         """Return a description of necessary config parameters for this backend."""
-        return "특정 설정 없음." # Default message
+        return "특정 설정 없음."  # Default message
 
     @staticmethod
-    @abstractmethod # Each backend MUST provide its name
+    @abstractmethod  # Each backend MUST provide its name
     def get_name() -> str:
         """Return the identifiable name of the backend."""
         pass

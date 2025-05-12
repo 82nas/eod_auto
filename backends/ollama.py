@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 # backends/ollama.py – Ollama AI Backend (v1.2.1)
 
-import os, re, json, textwrap, requests
+import os
+import re
+import textwrap
+import requests
 from typing import List, Tuple, Dict, Any
 from .base import AIBaseBackend
+
 
 # ---------------------------------------------------------------------------#
 # 0.  OllamaBackend 클래스
@@ -54,7 +58,7 @@ class OllamaBackend(AIBaseBackend):
             "model": self.model,
             "messages": [
                 {"role": "system", "content": sys_msg},
-                {"role": "user",   "content": user_msg},
+                {"role": "user", "content": user_msg},
             ],
             "options": {"temperature": 0, "num_ctx": 4096},
             "stream": False,
@@ -133,7 +137,7 @@ class OllamaBackend(AIBaseBackend):
 
         # ② FAIL 패턴
         if up.startswith("VALIDATION: FAIL"):
-            reason = res[len("Validation: FAIL"):].lstrip(" -")
+            reason = res[len("Validation: FAIL") :].lstrip(" -")
             return False, reason or "AI 검증 실패 (사유 미제공)"
 
         # ③ 예기치 않은 형식

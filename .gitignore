@@ -24,4 +24,5 @@ Thumbs.db
 # Other
 *.log
 *.tmp
-*.temp
+*.temp.venv_wsl/
+.venv_wsl/
