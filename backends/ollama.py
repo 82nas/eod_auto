@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# backends/ollama.py - Ollama AI Backend (v1.1 - 검증 로직 개선)
+# backends/ollama.py - Ollama AI Backend (v1.2 - 코드 끝 정리)
 
 import os
 import re
@@ -298,11 +298,8 @@ class OllamaBackend(AIBaseBackend):
         # Ollama API 호출하여 요약 보고서 생성 요청
         return self._req(sys_msg, user_msg)
 
+# 파일 끝에 빈 줄 추가 (일부 린터 호환성)
+
 ```
 
-**적용 방법:**
-
-1.  기존의 `backends/ollama.py` 파일 내용을 위 코드로 교체합니다.
-2.  `handover.py` 스크립트를 다시 실행하여 `save` 명령을 사용해 봅니다.
-
-이제 AI 검증 단계에서 `handover.py`는 `ollama.py`의 개선된 `verify_summary` 메서드를 호출할 것입니다. 검증에 성공하면 `(True, "AI validation passed.")`가 반환되고, 실패하면 `(False, "실패 사유...")`가 반환되어 `RuntimeError`가 발생하더라도 정확한 실패 원인이 메시지에 포함될 것으로 기대됩
+이 업데이트된 코드를 `backends/ollama.py`에 적용하고, 위에서 안내한 해결 방법 중 하나를 선택하여 다시 시도해 보시기 바랍
