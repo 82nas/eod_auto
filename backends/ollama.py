@@ -21,9 +21,9 @@ class OllamaBackend(AIBaseBackend):
         except requests.exceptions.RequestException as e:
             # Provide more specific error guidance
             if isinstance(e, requests.exceptions.ConnectionError):
-                 raise ConnectionError(f"Ollama 서버({self.base_url}) 연결 실패. Ollama가 실행 중인지, URL이 정확한지 확인하세요.") from e
+                raise ConnectionError(f"Ollama 서버({self.base_url}) 연결 실패. Ollama가 실행 중인지, URL이 정확한지 확인하세요.") from e
             else:
-                 raise ConnectionError(f"Ollama 서버({self.base_url}) 확인 중 오류 발생: {e}") from e
+                raise ConnectionError(f"Ollama 서버({self.base_url}) 확인 중 오류 발생: {e}") from e
 
     @staticmethod
     def get_name() -> str:
@@ -58,7 +58,7 @@ class OllamaBackend(AIBaseBackend):
         except requests.exceptions.ConnectionError as e:
             raise RuntimeError(f"Ollama API 연결 실패 ({self.base_url}): {e}") from e
         except requests.exceptions.Timeout as e:
-             raise RuntimeError(f"Ollama API 응답 시간 초과: {e}") from e
+            raise RuntimeError(f"Ollama API 응답 시간 초과: {e}") from e
         except requests.exceptions.RequestException as e: # Catch other request errors (like HTTPError)
             err_msg = f"Ollama API 요청 실패: {e}"
             if e.response is not None:
@@ -127,11 +127,17 @@ class OllamaBackend(AIBaseBackend):
         - 규칙 위반 사항이 **하나라도** 발견되면, 'OK' 대신 **발견된 모든 문제점**을 간결하게 한 줄씩 나열하여 보고합니다. (예: "- ## 결정 섹션 bullet point 1개 (최소 2개 필요)\n- ## 산출물 섹션에 설명 포함됨")
         """)
         res = self._req(sys_msg, user_msg)
-        # Basic check for empty response which might mean failure
-        if not res:
-            return False, "AI 검증 응답 없음"
-        is_ok = res.strip().upper() == "OK"
-        return is_ok, res
+        
+        if not res: # AI 응답이 아예 없는 경우
+            return False, f"AI 검증 응답 없음 ({self.get_name()})"
+
+        # *** 수정된 로직 시작 ***
+        stripped_res_upper = res.strip().upper()
+        # 응답의 시작 부분이 "**OK**" 또는 "OK"이면 성공으로 간주
+        is_ok = stripped_res_upper.startswith("**OK**") or stripped_res_upper.startswith("OK")
+        # *** 수정된 로직 끝 ***
+        
+        return is_ok, res # 원래 메시지(res)는 그대로 반환
 
     def load_report(self, md: str) -> str:
         sys_msg = textwrap.dedent("""

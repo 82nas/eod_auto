@@ -65,19 +65,19 @@ class HuggingFaceBackend(AIBaseBackend):
                 generated_text = None
 
             if not generated_text:
-                 raise ValueError(f"HF API 응답에서 'generated_text'를 찾을 수 없습니다. 응답: {result}")
+                raise ValueError(f"HF API 응답에서 'generated_text'를 찾을 수 없습니다. 응답: {result}")
 
             # Clean up response if needed (remove stop tokens etc.)
             if isinstance(generated_text, str):
-                 # Simple strip for common stop tokens if not handled by API
-                 generated_text = generated_text.replace("<|eot_id|>", "").strip()
+                # Simple strip for common stop tokens if not handled by API
+                generated_text = generated_text.replace("<|eot_id|>", "").strip()
 
             return generated_text
 
         except requests.exceptions.ConnectionError as e:
             raise RuntimeError(f"HF API 연결 실패: {e}") from e
         except requests.exceptions.Timeout as e:
-             raise RuntimeError(f"HF API 응답 시간 초과: {e}") from e
+            raise RuntimeError(f"HF API 응답 시간 초과: {e}") from e
         except requests.exceptions.RequestException as e:
             err_msg = f"HF API 요청 실패: {e}"
             if e.response is not None:
@@ -152,9 +152,17 @@ class HuggingFaceBackend(AIBaseBackend):
         - 규칙 위반 사항이 **하나라도** 발견되면, 'OK' 대신 **발견된 모든 문제점**을 간결하게 한 줄씩 나열하여 보고합니다. (예: "- ## 결정 섹션 bullet point 1개 (최소 2개 필요)\n- ## 산출물 섹션에 설명 포함됨")
         """)
         res = self._req(sys_msg, user_msg)
-        if not res: return False, "AI 검증 응답 없음 (HF)"
-        is_ok = res.strip().upper() == "OK"
-        return is_ok, res
+
+        if not res: # AI 응답이 아예 없는 경우
+            return False, f"AI 검증 응답 없음 ({self.get_name()})" # 백엔드 이름 포함
+
+        # *** 수정된 로직 시작 ***
+        stripped_res_upper = res.strip().upper()
+        # 응답의 시작 부분이 "**OK**" 또는 "OK"이면 성공으로 간주
+        is_ok = stripped_res_upper.startswith("**OK**") or stripped_res_upper.startswith("OK")
+        # *** 수정된 로직 끝 ***
+        
+        return is_ok, res # 원래 메시지(res)는 그대로 반환
 
     def load_report(self, md: str) -> str:
         # Identical prompt construction logic as OllamaBackend.load_report
