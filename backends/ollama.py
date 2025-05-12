@@ -15,11 +15,9 @@ class OllamaBackend(AIBaseBackend):
         self.base_url = config.get("ollama_base_url", os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
         # Check Ollama availability at init
         try:
-            # Use HEAD request for quick check without transferring body
             response = requests.head(self.base_url, timeout=5)
             response.raise_for_status()
         except requests.exceptions.RequestException as e:
-            # Provide more specific error guidance
             if isinstance(e, requests.exceptions.ConnectionError):
                 raise ConnectionError(f"Ollama 서버({self.base_url}) 연결 실패. Ollama가 실행 중인지, URL이 정확한지 확인하세요.") from e
             else:
@@ -48,59 +46,100 @@ class OllamaBackend(AIBaseBackend):
                         {"role": "system", "content": sys_msg},
                         {"role": "user", "content": user_msg}
                     ],
-                    "options": {"temperature": 0, "num_ctx": 4096}, # Consistent results
+                    "options": {"temperature": 0, "num_ctx": 4096},
                     "stream": False
                 },
                 timeout=180
             )
-            response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+            response.raise_for_status()
             return response.json()["message"]["content"].strip()
         except requests.exceptions.ConnectionError as e:
             raise RuntimeError(f"Ollama API 연결 실패 ({self.base_url}): {e}") from e
         except requests.exceptions.Timeout as e:
             raise RuntimeError(f"Ollama API 응답 시간 초과: {e}") from e
-        except requests.exceptions.RequestException as e: # Catch other request errors (like HTTPError)
+        except requests.exceptions.RequestException as e:
             err_msg = f"Ollama API 요청 실패: {e}"
             if e.response is not None:
-                err_msg += f"\n상태 코드: {e.response.status_code}\n응답: {e.response.text[:500]}" # Show partial response
+                err_msg += f"\n상태 코드: {e.response.status_code}\n응답: {e.response.text[:500]}"
             raise RuntimeError(err_msg) from e
         except (KeyError, IndexError, json.JSONDecodeError) as e:
-            # Handle cases where response structure is not as expected
             raise RuntimeError(f"Ollama API 응답 처리 오류 (예상치 못한 형식): {e}") from e
 
     def make_summary(self, task: str, ctx: str, arts: List[str]) -> str:
         sys_msg = textwrap.dedent("""
-        당신은 한국어로 프로젝트 인수인계 문서를 작성하는 시니어 개발자입니다.
-        다음 규칙을 **반드시** 준수하여 간결하고 명확하게 Markdown 형식으로 작성해주세요.
-        목표는 이 문서를 통해 다른 동료가 현재 상황을 빠르게 파악하고 다음 작업을 이어받을 수 있도록 하는 것입니다.
+        당신은 한국어로 프로젝트 인수인계 문서를 작성하는 매우 정확하고 꼼꼼한 시니어 개발자입니다.
+        주어진 모든 규칙을 **단 하나도 빠짐없이, 글자 그대로 정확하게** 준수하여 Markdown 형식으로 문서를 생성해야 합니다.
+        특히 헤더의 레벨과 형식이 매우 중요합니다. 이 문서는 다른 동료가 현재 상황을 즉시 파악하고 작업을 이어받는 데 사용됩니다.
         """)
         user_msg = textwrap.dedent(f"""
-        ### 작성 규칙
-        1.  **정확한 순서와 헤더:** 아래 7개의 섹션을 **정확히 이 순서대로**, **주어진 헤더 형식(# 또는 ##)**을 사용하여 작성해야 합니다. 다른 섹션 추가 금지.
-            ```markdown
-            # {task}
-            ## 목표
-            ## 진행
-            ## 결정
-            ## 결과
-            ## 다음할일
-            ## 산출물
+        ### **매우 중요한 작성 지침 (반드시, 반드시 엄수!)**
+
+        당신은 제공된 정보를 바탕으로 Markdown 형식의 인수인계 문서를 생성해야 합니다.
+        아래 **모든 규칙을 하나도 빠짐없이, 글자 그대로 정확하게 지켜서** 작성해주십시오.
+
+        ---
+        **1. ✨절대적인 헤더 구조 및 순서 (가장 중요!)✨:**
+        아래 제시된 7개의 섹션은 **정확히 이 순서대로, 그리고 명시된 헤더 레벨 및 형식으로만** 작성해야 합니다.
+        다른 섹션을 추가하거나, 헤더 레벨을 임의로 변경하거나, 순서를 바꾸는 것은 **절대 금지**입니다.
+
+        * **1-1. 최상위 헤더 (문서 제목):**
+            * **반드시, 반드시 `# {task}` 형식이어야 합니다.** (예시: `# 주요 기능 개발`)
+            * 이것은 **단 하나의 `#` 심볼**과 한 칸의 공백, 그리고 아래 "입력 정보"에서 제공되는 '작업 이름'으로 구성됩니다.
+            * **경고: 절대로 `## {task}` 또는 `### {task}` 와 같이 `#`을 두 개 이상 사용해서는 안 됩니다.** 오직 `#` 하나만 사용해야 합니다.
+
+        * **1-2. 하위 섹션 헤더:**
+            * 나머지 6개 섹션(목표, 진행, 결정, 결과, 다음할일, 산출물)은 **반드시 `## 섹션이름` 형식이어야 합니다.** (예시: `## 목표`, `## 진행`)
+            * 이것은 **정확히 두 개의 `##` 심볼**과 한 칸의 공백, 그리고 정해진 섹션 이름으로 구성됩니다.
+
+        **올바른 전체 헤더 구조 예시 (이 구조를 반드시 따르세요):**
+        ```markdown
+        # {task}
+        ## 목표
+        ## 진행
+        ## 결정
+        ## 결과
+        ## 다음할일
+        ## 산출물
+        ```
+        **(위 예시에서 `{task}` 부분만 실제 작업 이름으로 대체하고, 나머지는 그대로 사용합니다.)**
+
+        ---
+        **2. 내용 작성 규칙 - 간결성:**
+        * `## 산출물` 섹션을 제외한 각 `##` 섹션에는 핵심 내용을 담은 bullet point (`- ` 형식)를 **정확히 2개에서 5개 사이**로 사용합니다. (1개도 안되고, 6개도 안됩니다.)
+        * 문장은 짧고 명확하게, 한국어로 작성하며 불필요한 미사여구나 추측은 배제합니다.
+
+        ---
+        **3. 내용 작성 규칙 - `## 산출물` 섹션:**
+        * 이 섹션에는 **오직 제공된 '현재 작업 산출물 목록'에 있는 파일 이름들만 쉼표(`,`)로 구분하여 나열**합니다. (예시: `file1.py, image.png, document.pdf`)
+        * 산출물 목록이 없다면, 섹션 내용으로 "**없음**" 이라고만 정확히 명시합니다.
+        * 파일 경로, 추가 설명, bullet point 등 다른 내용은 **절대 포함하지 마십시오.**
+
+        ---
+        **4. 금지 사항 (엄격히 준수):**
+        * **어떤 경우에도** 표, 코드 블록(```), 인라인 코드(`), 이미지, HTML 태그 등 기본 Markdown(위에 명시된 헤더, bullet point, 쉼표 구분 목록)을 벗어난 그 어떤 확장 문법도 사용을 **금지**합니다.
+        * 이것은 인수인계 문서의 표준 형식을 유지하기 위함입니다.
+
+        ---
+        **5. 언어:**
+        * 모든 내용은 한국어로 작성합니다. (단, 파일명이나 코드에서 유래한 고유명사는 원본 그대로 사용 가능)
+
+        ---
+        ### **입력 정보 (이것을 바탕으로 위 규칙에 맞춰 작성):**
+
+        * **작업 이름 (최상위 헤더 `#` 뒤에 사용될 내용):** `{task}`
+            * **다시 한 번 강조합니다: 이 작업 이름은 반드시 `# {task}` 형식으로 문서의 첫 번째 줄, 최상위 헤더로 사용되어야 합니다. `#` 하나입니다!**
+
+        * **최근 작업 내용 / 대화 요약 (Context - 각 `##` 섹션 내용 구성에 참고):**
+            ```text
+            {ctx or '제공된 내용 없음'}
             ```
-        2.  **간결성:** 각 섹션(`산출물` 제외)에는 핵심 내용만 담은 bullet point (`- `)를 2~5개 사용합니다. 문장은 짧고 명확하게 작성하고, 불필요한 미사여구나 추측은 배제합니다.
-        3.  **산출물 섹션:** 이 섹션에는 제공된 산출물 목록(`{', '.join(arts) or '없음'}`)에 있는 파일 이름만 `, `로 구분하여 나열합니다. 파일 경로, 설명, 추가 bullet point는 사용하지 않습니다. 목록이 없으면 '없음'이라고 명시합니다.
-        4.  **금지 사항:** 표, 코드 블록(```), 인라인 코드(`), 이미지, HTML 태그 등 Markdown 확장 문법 사용을 금지합니다. 오직 기본 Markdown 문법(헤더, bullet point)만 사용하세요.
-        5.  **언어:** 모든 내용은 한국어로 작성합니다.
 
-        ### 입력 정보
-        - **작업 이름:** {task} (이것을 최상위 헤더 `#` 뒤에 사용)
-        - **최근 작업 내용 / 대화 요약 (Context):**
-          ```
-          {ctx or '제공된 내용 없음'}
-          ```
-        - **현재 작업 산출물 목록:** {', '.join(arts) or '없음'} (이것을 `## 산출물` 섹션에 나열)
+        * **현재 작업 산출물 목록 (`## 산출물` 섹션에 사용될 내용):** `{', '.join(arts) if arts else '없음'}`
 
-        ### 출력 (Markdown)
-        위 규칙과 입력 정보를 바탕으로 인수인계 문서를 작성하세요.
+        ---
+        ### **요청: Markdown 출력**
+        위의 **모든 지침과 규칙, 특히 절대적인 헤더 구조 규칙(1-1, 1-2)을 철저히 준수하여** 인수인계 문서를 Markdown 형식으로 생성해주십시오.
+        생성된 문서의 첫 번째 줄이 정확히 `# {task}` 형식인지 스스로 다시 한번 확인하고 출력해주십시오.
         """)
         return self._req(sys_msg, user_msg)
 
@@ -128,16 +167,13 @@ class OllamaBackend(AIBaseBackend):
         """)
         res = self._req(sys_msg, user_msg)
         
-        if not res: # AI 응답이 아예 없는 경우
+        if not res:
             return False, f"AI 검증 응답 없음 ({self.get_name()})"
 
-        # *** 수정된 로직 시작 ***
         stripped_res_upper = res.strip().upper()
-        # 응답의 시작 부분이 "**OK**" 또는 "OK"이면 성공으로 간주
         is_ok = stripped_res_upper.startswith("**OK**") or stripped_res_upper.startswith("OK")
-        # *** 수정된 로직 끝 ***
         
-        return is_ok, res # 원래 메시지(res)는 그대로 반환
+        return is_ok, res
 
     def load_report(self, md: str) -> str:
         sys_msg = textwrap.dedent("""
