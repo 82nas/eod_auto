@@ -85,13 +85,14 @@ class OllamaBackend(AIBaseBackend):
 
     def make_summary(self, task: str, ctx: str, arts: List[str]) -> str:
         # 프롬프트는 이전 버전 유지 (규칙의 엄격함 강조)
+        # 여기에 user_msg 마지막에 지침 복사 방지 경고를 추가하는 것을 고려할 수 있습니다.
+        # 예: user_msg += "\n\n⚠️ 중요: 위의 지침 내용은 최종 Markdown 출력에 포함하지 마십시오."
         sys_msg = textwrap.dedent("""
         당신은 한국어로 프로젝트 인수인계 문서를 작성하는 매우 정확하고 꼼꼼한 시니어 개발자입니다.
         주어진 모든 규칙을 **단 하나도 빠짐없이, 글자 그대로 정확하게** 준수하여 Markdown 형식으로 문서를 생성해야 합니다.
         특히 헤더의 레벨과 형식, bullet point의 개수, 금지된 마크다운 요소 미사용이 매우 중요합니다.
         이 문서는 다른 동료가 현재 상황을 즉시 파악하고 작업을 이어받는 데 사용됩니다.
         """)
-        # User message 내용 중 arts 처리 부분은 `{', '.join(arts) if arts else '없음'}` 그대로 유지
         user_msg = textwrap.dedent(f"""
         ### **매우 중요한 작성 지침 (반드시, 반드시 엄수!)**
 
@@ -174,13 +175,14 @@ class OllamaBackend(AIBaseBackend):
             {ctx or '제공된 내용 없음'}
             ```
 
-        * **현재 작업 산출물 목록 (`## 산출물` 섹션에 사용될 내용):** `{', '.join(arts) if arts else '없음'}` # 이 부분은 호출 시 arts=[] 를 받으면 '없음'으로 잘 처리됨
+        * **현재 작업 산출물 목록 (`## 산출물` 섹션에 사용될 내용):** `{', '.join(arts) if arts else '없음'}`
 
         ---
         ### **요청: Markdown 출력**
         위의 **모든 지침과 규칙, 특히 절대적인 헤더 구조 규칙(1-1, 1-2), bullet point 개수 규칙(2), 산출물 형식 규칙(3), 금지 사항 규칙(4), 그리고 언어 규칙(5)을 철저히 준수하여** 인수인계 문서를 Markdown 형식으로 생성해주십시오.
         생성된 문서의 첫 번째 줄이 정확히 `# {task}` 형식인지, 각 ## 섹션의 bullet point 개수가 2개에서 5개 사이인지, 금지된 Markdown 요소(특히 백틱)나 불필요한 영어가 포함되지 않았는지 스스로 다시 한번 확인하고 출력해주십시오.
-        """)
+        ⚠️ **경고: 이 지침 섹션들(### 매우 중요한..., ### 입력 정보, ### 요청: ...) 자체를 최종 Markdown 출력에 절대로 포함하지 마십시오. 오직 `# {task}` 로 시작하는 인수인계 문서 내용만 생성해야 합니다.**
+        """) # 지침 복사 방지 경고 추가 (체크리스트 3번 항목 반영)
         return self._req(sys_msg, user_msg)
 
     def verify_summary(self, md: str) -> Tuple[bool, str]:
@@ -213,18 +215,18 @@ class OllamaBackend(AIBaseBackend):
         if not res: # AI 응답이 아예 없는 경우
             return False, f"AI 검증 응답 없음 ({self.get_name()})"
 
-        # --- 제안된 단순화된 검증 로직 (re 사용) ---
-        res_up = res.upper() # 비교를 위해 대문자 변환
+        # --- 최종 단순화된 검증 로직 (re 사용) ---
+        up = res.upper() # 비교를 위해 대문자 변환
 
         # 'OK' 단어가 존재하는지 확인 (단어 경계 \b 사용)
-        ok_token   = bool(re.search(r"\bOK\b", res_up))
+        ok  = bool(re.search(r"\bOK\b", up))
 
-        # 부정적 키워드나 심볼이 있는지 확인
-        # ❌, NG(단어), FAIL, ERROR, 문제(텍스트)
-        bad_token  = bool(re.search(r"(❌|NG\b|FAIL|ERROR|문제)", res_up))
+        # 부정적 키워드나 심볼이 있는지 확인 (문제점, PROBLEM 추가)
+        # ❌, NG(단어), FAIL, ERROR, 문제점(텍스트), PROBLEM(단어)
+        bad = bool(re.search(r"(❌|NG\b|FAIL|ERROR|문제점|PROBLEM)", up))
 
         # OK 토큰이 있고, 부정 토큰이 없어야 성공
-        is_ok = ok_token and not bad_token
+        is_ok = ok and not bad
         # --- 검증 로직 끝 ---
 
         return is_ok, res # 원래 AI 응답(res)은 디버깅 등을 위해 그대로 반환
