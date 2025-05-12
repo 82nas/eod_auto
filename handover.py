@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# handover.py – 인수인계 v1.1.3 (전역 변수 참조 수정)
+# handover.py – 인수인계 v1.1.4 (GitRepo.save 구문 수정)
 
 from __future__ import annotations
 import os
@@ -37,10 +37,9 @@ except ImportError as e:
 load_dotenv()
 
 # --- 경로 & 상수 (초기 정의) ---
-# 이 값들은 main_cli 함수에서 Git 루트를 기준으로 재설정될 수 있습니다.
 INITIAL_ROOT_PATH = pathlib.Path('.').resolve()
-STATE_DIR = INITIAL_ROOT_PATH / "ai_states"
-ART_DIR = INITIAL_ROOT_PATH / "artifacts"
+STATE_DIR_MODULE_LEVEL = INITIAL_ROOT_PATH / "ai_states" # Module level for Serializer
+ART_DIR_MODULE_LEVEL = INITIAL_ROOT_PATH / "artifacts"   # Module level for Serializer
 BACKEND_DIR = pathlib.Path(__file__).resolve().parent / "backends"
 COMMIT_TAG = "state("
 
@@ -85,19 +84,19 @@ else:
 # --- AI Provider ---
 class AIProvider:
     def __init__(self, backend_name: str, config: Dict[str, Any]):
-        if not available_backends:
+        if not available_backends and backend_name != "none":
              raise RuntimeError("AIProvider 초기화 실패: AI 백엔드 없음.")
-        if backend_name != "none" and backend_name not in available_backends: # Allow "none"
+        if backend_name != "none" and backend_name not in available_backends:
             raise ValueError(f"알 수 없는 백엔드: {backend_name}. 사용 가능: {list(available_backends.keys()) + ['none']}")
 
         if backend_name == "none":
-            self.backend = None # Explicitly set to None if "none" is chosen
+            self.backend = None
             print(f"[dim]AI 백엔드: [bold yellow]none (비활성화됨)[/][/dim]")
             return
 
         BackendClass = available_backends[backend_name]
         try:
-            self.backend: Optional[AIBaseBackend] = BackendClass(config) # Type hint Optional
+            self.backend: Optional[AIBaseBackend] = BackendClass(config)
             print(f"[dim]AI 백엔드 사용: [bold cyan]{backend_name}[/][/dim]")
         except Exception as e:
             print(f"[bold red]오류: 백엔드 '{backend_name}' 초기화 실패: {e}[/]")
@@ -106,11 +105,11 @@ class AIProvider:
             raise e
 
     def make_summary(self, task: str, ctx: str, arts: List[str]) -> str:
-        if not self.backend: raise RuntimeError("AI 백엔드가 'none'으로 설정되어 요약을 생성할 수 없습니다.")
+        if not self.backend: raise RuntimeError("AI 백엔드 'none', 요약 생성 불가.")
         return self.backend.make_summary(task, ctx, arts)
 
     def verify_summary(self, md: str) -> Tuple[bool, str]:
-        if not self.backend: raise RuntimeError("AI 백엔드가 'none'으로 설정되어 요약을 검증할 수 없습니다.")
+        if not self.backend: raise RuntimeError("AI 백엔드 'none', 요약 검증 불가.")
         is_ok, msg = self.backend.verify_summary(md)
         if is_ok:
            lines = md.strip().split('\n'); headers = [l.strip() for l in lines if l.startswith('#')]
@@ -124,7 +123,7 @@ class AIProvider:
         return is_ok, msg
 
     def load_report(self, md: str) -> str:
-        if not self.backend: raise RuntimeError("AI 백엔드가 'none'으로 설정되어 보고서를 로드할 수 없습니다.")
+        if not self.backend: raise RuntimeError("AI 백엔드 'none', 보고서 로드 불가.")
         return self.backend.load_report(md)
 
 # --- GitRepo ---
@@ -157,7 +156,7 @@ class GitRepo:
     def get_diff(self, target: str = "HEAD", color: bool = True) -> str:
         if not self.repo: return "Git 저장소 초기화 안됨."
         try:
-            self.repo.commit(target) # Validate target
+            self.repo.commit(target)
             color_opt = '--color=always' if color else '--color=never'
             staged_diff = self.repo.git.diff('--staged', target, color_opt)
             working_tree_vs_target_diff = self.repo.git.diff(target, color_opt)
@@ -168,11 +167,13 @@ class GitRepo:
             elif not has_staged and has_wt_vs_target: diff_output += f"--- Changes in Working Directory (vs {target}) ---\n{working_tree_vs_target_diff}\n"
             return diff_output.strip() if diff_output.strip() else f"'{target}'과(와) 변경 사항 없음 (Git 추적 파일 기준)"
         except Exception as e: return f"Diff 생성 오류: {e}"
+
     def save(self, state_paths: List[pathlib.Path], task: str, snapshot_dir: Optional[pathlib.Path]) -> str:
         if not self.repo: raise RuntimeError("Git 저장소 없음.")
         paths_to_add_str = [str(p.resolve()) for p in state_paths]
         if snapshot_dir and snapshot_dir.exists() and any(snapshot_dir.iterdir()): paths_to_add_str.append(str(snapshot_dir.resolve()))
         if not state_paths: raise ValueError("저장할 상태 파일 없음.")
+
         self._safe(self.repo.git.add, *paths_to_add_str)
         commit_msg = f"{COMMIT_TAG}{task})"
         try: self._safe(self.repo.index.commit, commit_msg)
@@ -180,14 +181,23 @@ class GitRepo:
             if "nothing to commit" in str(e).lower() or "no changes added to commit" in str(e).lower():
                 return self.repo.head.commit.hexsha[:8] + " (변경 없음)"
             raise e
+
         if self.repo.remotes:
-            try: current_branch = self.get_current_branch();
-            if current_branch and not current_branch.startswith("DETACHED_HEAD"): self._safe(self.repo.git.push, 'origin', current_branch); print("[green]원격 푸시 완료.[/]")
-            else: print(f"[yellow]경고: 현재 브랜치({current_branch}) 특정 불가, 푸시 생략.[/]")
-            except RuntimeError as e: print(f"[yellow]경고: 원격 푸시 실패. ({e})[/]")
-        else: print("[yellow]경고: 원격 저장소 없음, 푸시 생략.[/]")
+            try: 
+                current_branch_name = self.get_current_branch()
+                if current_branch_name and not current_branch_name.startswith("DETACHED_HEAD"):
+                    self._safe(self.repo.git.push, 'origin', current_branch_name) # Corrected line
+                    print("[green]원격 푸시 완료.[/]") # Corrected line
+                else: # Corrected line
+                    print(f"[yellow]경고: 현재 브랜치({current_branch_name})를 특정할 수 없어 푸시를 건너뜁니다.[/]") # Corrected string
+            except RuntimeError as e: 
+                print(f"[yellow]경고: 원격 저장소 푸시 실패. 로컬에는 커밋되었습니다. ({e})[/]")
+        else: 
+            print("[yellow]경고: 설정된 원격 저장소가 없어 푸시를 건너뜁니다.[/]") # Corrected string
+
         return self.repo.head.commit.hexsha[:8]
-    def list_states(self, current_state_dir: pathlib.Path) -> List[Dict]: # Pass state_dir
+
+    def list_states(self, current_state_dir: pathlib.Path) -> List[Dict]:
         if not self.repo: return []
         items = [];
         try: commits = list(self.repo.iter_commits(max_count=100, first_parent=True, paths=str(current_state_dir)))
@@ -196,8 +206,6 @@ class GitRepo:
             if not c.message.startswith(COMMIT_TAG): continue
             headline = ""; meta_blob = None
             try:
-                # Search within the specific commit's tree, relative to state_dir
-                # Use current_state_dir.name as the prefix for paths within the commit tree
                 if current_state_dir.name in c.tree:
                     for item in c.tree[current_state_dir.name].traverse():
                         if isinstance(item, Blob) and item.name.endswith(".meta.json"): meta_blob = item; break
@@ -208,7 +216,8 @@ class GitRepo:
             except Exception: headline = "[메타데이터 오류]"
             items.append({"hash": c.hexsha[:8], "task": c.message[len(COMMIT_TAG):-1].strip(), "time": datetime.datetime.fromtimestamp(c.committed_date).strftime("%Y-%m-%d %H:%M"), "head": headline or "-"})
         return list(reversed(items))
-    def load_state(self, commit_hash: str, current_state_dir: pathlib.Path) -> str: # Pass state_dir
+
+    def load_state(self, commit_hash: str, current_state_dir: pathlib.Path) -> str:
         if not self.repo: raise RuntimeError("Git 저장소 없음.")
         try: commit_obj = self.repo.commit(self.repo.git.rev_parse(commit_hash))
         except Exception as e: raise RuntimeError(f"커밋 '{commit_hash}' 접근 오류: {e}") from e
@@ -222,6 +231,8 @@ class GitRepo:
         except KeyError: raise RuntimeError(f"커밋 '{commit_hash}'에 '{current_state_dir.name}' 폴더 없음.")
         except Exception as e: raise RuntimeError(f"'{commit_hash}' 상태 로드 중 오류: {e}")
 
+# --- Serializer ---
+# (Serializer class content remains the same as v1.1.2, ensure it's correct from previous full code)
 class Serializer:
     @staticmethod
     def _calculate_sha256(fp: pathlib.Path) -> Optional[str]:
@@ -241,14 +252,14 @@ class Serializer:
          return f"""<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>{title_meta}</title>{css}</head><body>{body}</body></html>"""
 
     @staticmethod
-    def save_state(md: str, task: str, state_dir_path: pathlib.Path, art_dir_path: pathlib.Path, current_root: pathlib.Path) -> Tuple[List[pathlib.Path], Optional[pathlib.Path]]:
+    def save_state(md: str, task: str, current_state_dir: pathlib.Path, current_art_dir: pathlib.Path, current_root: pathlib.Path) -> Tuple[List[pathlib.Path], Optional[pathlib.Path]]: # Added current_root
         ts = datetime.datetime.now().strftime("%Y%m%dT%H%M%S"); safe_task = "".join(c for c in task if c.isalnum() or c in (' ','_','-')).strip().replace(' ','_');
         if not safe_task: safe_task="untitled_task";
         base_fn = f"{ts}_{safe_task}"
 
-        state_dir_path.mkdir(exist_ok=True); art_dir_path.mkdir(exist_ok=True) # Ensure they exist
+        current_state_dir.mkdir(exist_ok=True); current_art_dir.mkdir(exist_ok=True)
 
-        state_f = state_dir_path / f"{base_fn}.md"; html_f = state_dir_path / f"{base_fn}.html"; meta_f = state_dir_path / f"{base_fn}.meta.json"
+        state_f = current_state_dir / f"{base_fn}.md"; html_f = current_state_dir / f"{base_fn}.html"; meta_f = current_state_dir / f"{base_fn}.meta.json"
         try: state_f.write_text(md, encoding="utf-8")
         except IOError as e: raise RuntimeError(f"MD 파일 저장 실패 ({state_f}): {e}") from e
 
@@ -256,10 +267,10 @@ class Serializer:
         try: html_f.write_text(Serializer._generate_html(md,task),encoding="utf-8"); html_ok=True
         except Exception as e: print(f"[yellow]경고: HTML 생성 실패 ({html_f.name}): {e}[/]")
 
-        snap_dir = None; checksums = {}; arts = [f for f in art_dir_path.iterdir() if f.is_file()] if art_dir_path.exists() else []
+        snap_dir = None; checksums = {}; arts = [f for f in current_art_dir.iterdir() if f.is_file()] if current_art_dir.exists() else []
         if arts:
-            snap_dir = art_dir_path / f"{base_fn}_artifacts"; snap_dir.mkdir(parents=True,exist_ok=True)
-            print(f"[dim]아티팩트 스냅샷 ({len(arts)}개) -> '{snap_dir.relative_to(current_root)}'[/]")
+            snap_dir = current_art_dir / f"{base_fn}_artifacts"; snap_dir.mkdir(parents=True,exist_ok=True)
+            print(f"[dim]아티팩트 스냅샷 ({len(arts)}개) -> '{snap_dir.relative_to(current_root)}'[/]") # Use current_root
             for f_art in arts:
                 try: shutil.copy2(f_art, snap_dir/f_art.name); cs = Serializer._calculate_sha256(snap_dir/f_art.name);
                 if cs: checksums[f_art.name] = cs
@@ -280,7 +291,9 @@ class Serializer:
     @staticmethod
     def to_prompt(md: str, commit: str) -> str: return f"### 이전 상태 (Commit: {commit}) ###\n\n{md}\n\n### 상태 끝 ###"
 
-class UI: # UI class remains largely the same
+# --- UI ---
+# (UI class content remains the same as v1.1.2)
+class UI:
     console = Console()
     @staticmethod
     def task_name(default:str="작업 요약") -> str: return Prompt.ask("[bold cyan]작업 이름[/]",default=default)
@@ -323,12 +336,12 @@ class UI: # UI class remains largely the same
         if not txt.strip() or "변경 사항 없음" in txt or "오류" in txt: print(f"[dim]{txt}[/]"); return
         UI.console.print(Panel(Syntax(txt,"diff",theme="default",line_numbers=False,word_wrap=False),title=f"[bold]Diff (vs {target})[/]",border_style="yellow",expand=True))
 
+# --- Handover ---
 class Handover:
     def __init__(self, backend_choice: str, current_root: pathlib.Path):
         self.ui = UI(); self.root_dir = current_root
-        # Define instance-specific paths based on current_root
-        self.state_dir = self.root_dir / "ai_states"
-        self.art_dir = self.root_dir / "artifacts"
+        self.state_dir = self.root_dir / "ai_states" # Use instance-specific paths
+        self.art_dir = self.root_dir / "artifacts"   # Use instance-specific paths
 
         try: self.git = GitRepo(self.root_dir)
         except InvalidGitRepositoryError: self.git = None
@@ -367,7 +380,7 @@ class Handover:
             if not is_ok: raise RuntimeError(f"AI 생성 문서 검증 실패:\n{val_msg}")
             self.ui.notify("AI 검증 통과!", style="green")
 
-            # Pass correct paths to Serializer
+            # Pass instance-specific paths to Serializer
             state_files, snap_dir = Serializer.save_state(md_summary, task, self.state_dir, self.art_dir, self.root_dir)
             commit_hash = self.git.save(state_files, task, snap_dir)
             self.ui.notify(f"상태 저장 완료! (Commit: {commit_hash})", style="bold green")
@@ -378,13 +391,13 @@ class Handover:
     def load(self, latest: bool = False):
         self._ensure_prereqs("load", True, True)
         try:
-            states = self.git.list_states(self.state_dir) # Pass correct state_dir
+            states = self.git.list_states(self.state_dir) # Pass instance-specific state_dir
             if not states: self.ui.error("저장된 상태 없음."); return
             sel_hash = states[-1]["hash"] if latest else self.ui.pick_state(states)
             if not sel_hash: return
             if latest: print(f"[info]최신 상태 로드: {sel_hash} ({next((s['task'] for s in states if s['hash']==sel_hash),'')})[/]")
             self.ui.console.print(f"[bold yellow]{sel_hash} 커밋에서 상태 로드 중...[/]")
-            md_content = self.git.load_state(sel_hash, self.state_dir) # Pass correct state_dir
+            md_content = self.git.load_state(sel_hash, self.state_dir) # Pass instance-specific state_dir
             prompt_fmt = Serializer.to_prompt(md_content, sel_hash)
             self.ui.panel(prompt_fmt, f"로드된 상태 (Commit: {sel_hash})", border_style="cyan")
             self.ui.console.print("[bold yellow]AI가 로드된 상태 분석/요약...[/]")
@@ -406,7 +419,7 @@ class Handover:
         try:
             commit = self.git.repo.commit(self.git.repo.git.rev_parse(commit_hash))
             meta_blob = None
-            # Search for meta file in the commit's STATE_DIR relative to instance's root_dir
+            # Use instance-specific state_dir.name for path construction
             commit_state_dir_path_str = (self.state_dir.relative_to(self.root_dir)).as_posix()
 
             for item_path_str in [p.path for p in commit.tree.traverse()]:
@@ -421,34 +434,34 @@ class Handover:
         except GitCommandError: self.ui.error(f"커밋 해시 '{commit_hash}' 없음.")
         except Exception as e: self.ui.error(f"체크섬 정보 로드 중 오류 ({commit_hash})", traceback.format_exc())
 
-def main_cli():
-    # Use global variables defined at the top, ensure they are correctly set
-    # The global STATE_DIR, ART_DIR will be updated based on actual_git_root
-    # if a git repo is found.
-    global INITIAL_ROOT_PATH, STATE_DIR, ART_DIR
+# --- main_cli ---
+def main_cli_entry_point(): # Renamed to avoid conflict with module-level main if any
+    # This function now sets up and uses instance paths correctly
+    # It will determine the root path and pass it to Handover instance.
 
-    actual_git_root = None
-    is_git_repo_check = False
+    cli_root_path = pathlib.Path('.').resolve() # Default to CWD
+    is_git_repo_at_cli_root = False
     try:
         # This finds the .git dir and gives the root of the working tree
-        actual_git_root = pathlib.Path(Repo('.', search_parent_directories=True).working_tree_dir)
-        INITIAL_ROOT_PATH = actual_git_root # Update root path to actual git root
-        is_git_repo_check = True
+        # This should be the true project root if we are in a git repo
+        git_repo_root_obj = Repo('.', search_parent_directories=True)
+        cli_root_path = pathlib.Path(git_repo_root_obj.working_tree_dir)
+        is_git_repo_at_cli_root = True
     except InvalidGitRepositoryError:
-        # Keep INITIAL_ROOT_PATH as Path('.').resolve() if not in a git repo
-        # UI.error will handle commands that need git repo
+        # Not a git repo, or not in one. cli_root_path remains as CWD.
         pass
 
-    # Update module-level STATE_DIR and ART_DIR based on the determined root
-    STATE_DIR = INITIAL_ROOT_PATH / "ai_states"
-    ART_DIR = INITIAL_ROOT_PATH / "artifacts"
+    # Define STATE_DIR and ART_DIR based on the determined cli_root_path for global use by Serializer if needed
+    # but Handover instance will use its own self.state_dir and self.art_dir
+    global STATE_DIR_MODULE_LEVEL, ART_DIR_MODULE_LEVEL
+    STATE_DIR_MODULE_LEVEL = cli_root_path / "ai_states"
+    ART_DIR_MODULE_LEVEL = cli_root_path / "artifacts"
 
-    # Ensure these directories exist before any Handover method might use them
-    # (though Handover methods also do mkdir)
-    STATE_DIR.mkdir(exist_ok=True)
-    ART_DIR.mkdir(exist_ok=True)
+    # Ensure these directories exist (primarily for Serializer if it uses globals)
+    STATE_DIR_MODULE_LEVEL.mkdir(exist_ok=True)
+    ART_DIR_MODULE_LEVEL.mkdir(exist_ok=True)
 
-    parser = argparse.ArgumentParser(description="AI 기반 프로젝트 인수인계 상태 관리 도구 (v1.1.3)", formatter_class=argparse.RawTextHelpFormatter)
+    parser = argparse.ArgumentParser(description="AI 기반 프로젝트 인수인계 상태 관리 도구 (v1.1.4)", formatter_class=argparse.RawTextHelpFormatter)
     backend_choices = list(available_backends.keys()) if available_backends else []
     default_be = "none"
     if "ollama" in backend_choices: default_be = "ollama"
@@ -474,21 +487,20 @@ def main_cli():
     args = parser.parse_args()
 
     chosen_cmd_config = next(c for c in cmd_configs if c[0] == args.command)
-    if chosen_cmd_config[2] and not is_git_repo_check: # Git required
-        UI.error(f"'{args.command}' 명령은 Git 저장소 내에서 실행해야 합니다. (현재 위치: {INITIAL_ROOT_PATH})")
+    if chosen_cmd_config[2] and not is_git_repo_at_cli_root:
+        UI.error(f"'{args.command}' 명령은 Git 저장소 내에서 실행해야 합니다. (현재 위치: {cli_root_path})")
         sys.exit(1)
-    if chosen_cmd_config[3] and (not available_backends or args.backend == "none"): # AI required
+    if chosen_cmd_config[3] and (not available_backends or args.backend == "none"):
         msg = "사용 가능한 AI 백엔드가 없습니다. 'backends' 폴더 확인." if not available_backends else f"AI 백엔드가 '{args.backend}'(으)로 설정됨."
         UI.error(f"'{args.command}' 명령 실행 불가: {msg} AI 기능이 필요합니다.")
         sys.exit(1)
 
-    print(f"[bold underline]Handover 스크립트 v1.1.3[/]")
-    if is_git_repo_check and actual_git_root: print(f"[dim]프로젝트 루트: {actual_git_root}[/]")
-    else: print(f"[dim]현재 작업 폴더: {INITIAL_ROOT_PATH} (Git 저장소 아님)[/]")
+    print(f"[bold underline]Handover 스크립트 v1.1.4[/]")
+    if is_git_repo_at_cli_root: print(f"[dim]프로젝트 루트: {cli_root_path}[/]")
+    else: print(f"[dim]현재 작업 폴더: {cli_root_path} (Git 저장소 아님)[/]")
 
     try:
-        # Pass the determined root path to Handover instance
-        handler = Handover(backend_choice=args.backend, current_root=INITIAL_ROOT_PATH)
+        handler = Handover(backend_choice=args.backend, current_root=cli_root_path)
         if args.command == "save": handler.save()
         elif args.command == "load": handler.load(latest=args.latest)
         elif args.command == "diff": handler.diff(target=args.target)
@@ -501,4 +513,4 @@ if __name__ == "__main__":
     if sys.version_info < (3, 8):
          print("[bold red]오류: Python 3.8 이상 필요.[/]")
          sys.exit(1)
-    main_cli()
+    main_cli_entry_point() # Call the renamed main function
