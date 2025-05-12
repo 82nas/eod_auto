@@ -1,0 +1,41 @@
+<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>프롬프트 전달</title><style>body{font-family:sans-serif;line-height:1.6;padding:20px;max-width:800px;margin:auto;color:#333}h1,h2{border-bottom:1px solid #eee;padding-bottom:.3em;margin-top:1.5em;margin-bottom:1em}h1{font-size:2em}h2{font-size:1.5em}ul,ol{padding-left:2em}li{margin-bottom:.5em}code{background-color:#f0f0f0;padding:.2em .4em;border-radius:3px;font-family:monospace;font-size:.9em}pre{background-color:#f5f5f5;padding:1em;border-radius:4px;overflow-x:auto}pre code{background-color:transparent;padding:0;border-radius:0}blockquote{border-left:4px solid #ccc;padding-left:1em;color:#666;margin-left:0}table{border-collapse:collapse;width:100%;margin-bottom:1em}th,td{border:1px solid #ddd;padding:8px;text-align:left}th{background-color:#f2f2f2}</style></head><body><h1>프롬프트 전달</h1>
+
+<h2>목표</h2>
+
+<ul>
+<li>채팅 기록을 기반으로 AI 동료가 이해하기 쉬운 프롬프트를 작성한다.</li>
+<li>내부 검증에 통과하는 인수인계 문서 형식 규칙을 준수한다.</li>
+</ul>
+
+<h2>진행</h2>
+
+<ul>
+<li>기존 프롬프트 블록이 규칙을 어겨 내부 헤더 검사에서 실패한 사실을 확인했다.</li>
+<li>프롬프트 내용을 재작성하여 요구되는 헤더 구조와 불릿 개수 규칙에 맞췄다.</li>
+</ul>
+
+<h2>결정</h2>
+
+<ul>
+<li>최상위 헤더를 # 프롬프트 전달로 지정하고 필수 7-헤더 구조를 적용하기로 결정했다.</li>
+<li>각 섹션의 불릿 포인트를 2개로 통일해 가독성을 높이기로 했다.</li>
+</ul>
+
+<h2>결과</h2>
+
+<ul>
+<li>내부 구조 검증 요구 사항(헤더‧불릿 규칙)을 만족하는 새 인수인계 문서 초안을 완성했다.</li>
+<li>형식 오류를 방지하기 위해 불필요한 코드 블록과 인라인 코드, 영어 설명을 모두 제거했다.</li>
+</ul>
+
+<h2>다음할일</h2>
+
+<ul>
+<li>Ollama 백엔드로 새 문서를 검증하여 최종 통과 여부를 확인한다.</li>
+<li>pre-commit Ruff 잔여 오류를 수정하고 커밋까지 자동화 절차를 마무리한다.</li>
+</ul>
+
+<h2>산출물</h2>
+
+<p>없음</p>
+</body></html>
