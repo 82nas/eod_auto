@@ -150,7 +150,7 @@ class AIProvider:
             print("[DEBUG] Backend reported OK. Starting internal structure checks...") # 내부 검증 시작 알림
             lines = md.strip().split('\n')
             headers = [l.strip() for l in lines if l.startswith('#')]
-            required_headers_structure = ["#", "## 목표 이름", "## 진행 이름", "## 결정 이름", "## 결과 이름", "## 다음할일 이름", "## 산출물"]
+            required_headers_structure = ["#", "## 목표", "## 진행", "## 결정", "## 결과", "## 다음할일", "## 산출물"]
             print(f"[DEBUG] Internal Check - Found Headers: {headers}") # 찾아낸 헤더 목록 출력
 
             # 1. 헤더 개수 검증

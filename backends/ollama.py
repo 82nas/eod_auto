@@ -67,7 +67,7 @@ class OllamaBackend(AIBaseBackend):
             ### 절대 규칙
             • 헤더 구조(정확히 7개, 순서 고정)
               # {task}
-              ## 목표 이름
+              ## 목표
               ## 진행
               ## 결정
               ## 결과
