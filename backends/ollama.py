@@ -1,4 +1,4 @@
-# ollama.py
+# backends/ollama.py
 import os
 import requests
 import textwrap
@@ -54,25 +54,54 @@ class OllamaBackend(AIBaseBackend):
                 timeout=180
             )
             response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
-            return response.json()["message"]["content"].strip()
+
+            # --- Improved Response Parsing ---
+            response_data = response.json()
+            # Check if 'message' key and its 'content' key exist before accessing
+            message_data = response_data.get("message")
+            if isinstance(message_data, dict):
+                 message_content = message_data.get("content", "")
+            else:
+                 # Handle cases where 'message' might not be a dict or is missing
+                 # Log a warning or raise a more specific error if needed
+                 # For now, default to empty string if structure is unexpected
+                 print(f"Warning: Unexpected 'message' structure in Ollama response: {message_data}")
+                 message_content = ""
+            # --- End Improved Response Parsing ---
+
+            return message_content.strip()
+
         except requests.exceptions.ConnectionError as e:
             raise RuntimeError(f"Ollama API 연결 실패 ({self.base_url}): {e}") from e
         except requests.exceptions.Timeout as e:
-            raise RuntimeError(f"Ollama API 응답 시간 초과: {e}") from e
+            # Include model name in timeout error
+            raise RuntimeError(f"Ollama API 응답 시간 초과 (모델: {self.model}): {e}") from e
         except requests.exceptions.RequestException as e: # Catch other request errors (like HTTPError)
-            err_msg = f"Ollama API 요청 실패: {e}"
+            # Include model name and provide more response details
+            err_msg = f"Ollama API 요청 실패 (모델: {self.model}): {e}"
             if e.response is not None:
-                err_msg += f"\n상태 코드: {e.response.status_code}\n응답: {e.response.text[:500]}" # Show partial response
+                try:
+                    # Attempt to parse JSON error, fallback to text
+                    err_details = e.response.json()
+                    err_msg += f"\n상태 코드: {e.response.status_code}\n오류: {err_details.get('error', e.response.text[:500])}"
+                except json.JSONDecodeError:
+                     err_msg += f"\n상태 코드: {e.response.status_code}\n응답 (텍스트): {e.response.text[:500]}"
             raise RuntimeError(err_msg) from e
-        except (KeyError, IndexError, json.JSONDecodeError) as e:
-            # Handle cases where response structure is not as expected
-            raise RuntimeError(f"Ollama API 응답 처리 오류 (예상치 못한 형식): {e}") from e
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as e:
+             # Improve error message for unexpected response structure
+             response_text_snippet = "응답 내용 확인 불가"
+             # Check if 'response' exists and has 'text' attribute before accessing
+             if 'response' in locals() and hasattr(response, 'text'):
+                 response_text_snippet = response.text[:1000] # Show larger snippet
+             raise RuntimeError(f"Ollama API 응답 처리 오류 (모델: {self.model}, 예상치 못한 형식): {e}\n받은 응답 미리보기: {response_text_snippet}") from e
 
     def make_summary(self, task: str, ctx: str, arts: List[str]) -> str:
+        # Using the very strict prompt from the original example
         sys_msg = textwrap.dedent("""
         당신은 한국어로 프로젝트 인수인계 문서를 작성하는 매우 정확하고 꼼꼼한 시니어 개발자입니다.
         주어진 모든 규칙을 **단 하나도 빠짐없이, 글자 그대로 정확하게** 준수하여 Markdown 형식으로 문서를 생성해야 합니다.
-        특히 헤더의 레벨과 형식이 매우 중요합니다. 이 문서는 다른 동료가 현재 상황을 즉시 파악하고 작업을 이어받는 데 사용됩니다.
+        특히 헤더의 레벨과 형식, bullet point의 개수, 금지된 마크다운 요소 미사용이 매우 중요합니다.
+        이 문서는 다른 동료가 현재 상황을 즉시 파악하고 작업을 이어받는 데 사용됩니다.
         """)
         user_msg = textwrap.dedent(f"""
         ### **매우 중요한 작성 지침 (반드시, 반드시 엄수!)**
@@ -107,14 +136,27 @@ class OllamaBackend(AIBaseBackend):
         **(위 예시에서 `{task}` 부분만 실제 작업 이름으로 대체하고, 나머지는 그대로 사용합니다.)**
 
         ---
-        **2. 내용 작성 규칙 - 간결성:**
-        * `## 산출물` 섹션을 제외한 각 `##` 섹션에는 핵심 내용을 담은 bullet point (`- ` 형식)를 **정확히 2개에서 5개 사이**로 사용합니다. (1개도 안되고, 6개도 안됩니다.)
-        * 문장은 짧고 명확하게, 한국어로 작성하며 불필요한 미사여구나 추측은 배제합니다.
+        **2. ✨내용 작성 규칙 - Bullet Point (매우 중요!)✨:**
+        * `## 산출물` 섹션을 **제외한 모든 `##` 섹션 각각**에는, 핵심 내용을 담은 bullet point (`- ` 형식)를 **정확히 2개에서 5개 사이**로 사용해야 합니다. (1개도 안되고, 6개 이상도 안됩니다.)
+        * **만약 어떤 `##` 섹션에 해당하는 내용이 부족하여 bullet point를 2개 채울 수 없다면, 반드시 `- 특이사항 없음.` 또는 `- 추가적인 결정 사항 없음.` 등과 같이 일반적인 내용을 포함한 bullet point를 추가하여 총 2개 이상을 만드십시오.** (마침표로 끝나는 완전한 문장 형태)
+            * 예시 (`## 결정` 섹션 내용이 하나밖에 없을 경우):
+                ```
+                ## 결정
+                - 주요 기능 A에 대해 PostgreSQL 사용 결정함.
+                - 추가적인 결정 사항 현재 없음.
+                ```
+            * 예시 (`## 다음할일` 섹션 내용이 없을 경우):
+                ```
+                ## 다음할일
+                - 현재까지 파악된 즉시 진행할 다음 할 일 없음.
+                - 프로젝트 관리자와 다음 단계 논의 예정임.
+                ```
+        * 문장은 짧고 명확하게, 한국어로 작성하며 불필요한 미사여구나 추측은 배제합니다. 각 bullet point는 완전한 문장으로 마침표로 끝나도록 합니다.
 
         ---
         **3. 내용 작성 규칙 - `## 산출물` 섹션:**
         * 이 섹션에는 **오직 제공된 '현재 작업 산출물 목록'에 있는 파일 이름들만 쉼표(`,`)로 구분하여 나열**합니다. (예시: `file1.py, image.png, document.pdf`)
-        * 산출물 목록이 없다면, 섹션 내용으로 "**없음**" 이라고만 정확히 명시합니다.
+        * 산출물 목록이 없다면, 섹션 내용으로 "**없음**" 이라고만 정확히 명시합니다. **이 경우, "없음"이라는 단어 외에 다른 어떤 설명이나 bullet point도 추가하지 마십시오.** (예: `## 산출물\n없음`)
         * 파일 경로, 추가 설명, bullet point 등 다른 내용은 **절대 포함하지 마십시오.**
 
         ---
@@ -122,15 +164,15 @@ class OllamaBackend(AIBaseBackend):
         * **어떤 경우에도** 다음 요소들의 사용을 **엄격히 금지**합니다. 이 규칙을 어기면 결과물은 실패로 간주됩니다:
             * 표 (Tables)
             * 코드 블록 (``` ... ```) - 이 `make_summary` 작업에서는 코드 블록도 절대 허용되지 않습니다.
-            * **인라인 코드 (` `) - 예시: `변수명`, `my_file.py`, `some_function()` 와 같이 백틱으로 감싸는 형식은 절대 금지입니다! 기술 용어나 파일 이름도 일반 텍스트로만 작성하세요.**
+            * **인라인 코드 (` `) - 예시: `변수명`, `my_file.py`, `some_function()` 와 같이 백틱으로 감싸는 형식은 절대 금지입니다! 기술 용어나 파일 이름, 데이터베이스 이름(예: Oracle, PostgreSQL) 등 모든 것을 일반 텍스트로만 작성하세요. 백틱(`)은 어떤 상황에서도 사용하지 마십시오.**
             * 이미지 (![alt](url))
             * HTML 태그 (<p>, <b>, <span> 등)
             * **Markdown 체크박스 (`[ ]` 또는 `[x]`) - 할 일 목록은 일반 bullet point (`-`)와 텍스트로만 작성해야 합니다. `[ ]` 형식은 절대 사용하지 마세요.**
-        * 이 지침은 인수인계 문서의 표준성과 단순성을 유지하기 위함입니다. 오직 위에 명시된 헤더 형식, bullet point (`- `), 그리고 `## 산출물` 섹션의 쉼표 구분 파일 목록만 허용됩니다.
+        * 이 지침은 인수인계 문서의 표준성과 단순성을 유지하기 위함입니다. 오직 위에 명시된 헤더 형식, bullet point (`- `), 그리고 `## 산출물` 섹션의 쉼표 구분 파일 목록 또는 "없음" 텍스트만 허용됩니다.
         * **특히 '## 다음할일' 섹션 작성 시 주의:** 각 할 일은 `- 일반 텍스트로 된 할 일 설명입니다.` 와 같이 **순수 텍스트**로만 작성하고, 절대로 Markdown 특수 문자(백틱, 대괄호, #, *, _ 등)를 내용에 포함시키지 마십시오. 예를 들어, 파일명을 언급해야 한다면 `ollama.py 파일 수정`이 아니라 `ollama 점 py 파일 수정` 과 같이 하거나, 단순히 `ollama 파일 수정`으로 작성하세요.
         ---
-        **5. 언어:**
-        * 모든 내용은 한국어로 작성합니다. (단, 파일명이나 코드에서 유래한 고유명사는 원본 그대로 사용 가능)
+        **5. ✨언어 규칙 (매우 중요!)✨:**
+        * 모든 설명은 **반드시 한국어로만 작성하십시오.** 영어 단어는 'Oracle', 'PostgreSQL', 'DB_Migration_Plan_v0.1.docx'와 같이 제품명, 기술 용어, 또는 원래부터 영어인 고유명사를 제외하고는 **절대 사용하지 마십시오.** 일반적인 서술이나 설명에 영어를 사용해서는 안 됩니다. (예: "OK", "NG", "Context", "Session ID", "bullet point" 등의 단어도 생성되는 문서에는 한국어로 대체하거나 사용하지 마십시오.)
 
         ---
         ### **입력 정보 (이것을 바탕으로 위 규칙에 맞춰 작성):**
@@ -147,12 +189,13 @@ class OllamaBackend(AIBaseBackend):
 
         ---
         ### **요청: Markdown 출력**
-        위의 **모든 지침과 규칙, 특히 절대적인 헤더 구조 규칙(1-1, 1-2)과 금지 사항 규칙(4)을 철저히 준수하여** 인수인계 문서를 Markdown 형식으로 생성해주십시오.
-        생성된 문서의 첫 번째 줄이 정확히 `# {task}` 형식인지 스스로 다시 한번 확인하고 출력해주십시오. 또한, 금지된 Markdown 요소가 포함되지 않았는지 반드시 확인해주십시오.
+        위의 **모든 지침과 규칙, 특히 절대적인 헤더 구조 규칙(1-1, 1-2), bullet point 개수 규칙(2), 산출물 형식 규칙(3), 금지 사항 규칙(4), 그리고 언어 규칙(5)을 철저히 준수하여** 인수인계 문서를 Markdown 형식으로 생성해주십시오.
+        생성된 문서의 첫 번째 줄이 정확히 `# {task}` 형식인지, 각 ## 섹션의 bullet point 개수가 2개에서 5개 사이인지, 금지된 Markdown 요소(특히 백틱)나 불필요한 영어가 포함되지 않았는지 스스로 다시 한번 확인하고 출력해주십시오.
         """)
         return self._req(sys_msg, user_msg)
 
     def verify_summary(self, md: str) -> Tuple[bool, str]:
+        # Using the strict prompt from the original example
         sys_msg = textwrap.dedent("""
         당신은 Markdown 문서 형식을 검증하는 매우 꼼꼼한 검토자입니다.
         주어진 Markdown 텍스트가 아래 규칙을 모두 준수하는지 확인하고 결과를 보고합니다.
@@ -160,10 +203,10 @@ class OllamaBackend(AIBaseBackend):
         user_msg = textwrap.dedent(f"""
         ### 검증 규칙
         1.  **필수 헤더 및 순서:** 다음 7개 헤더가 정확한 순서와 레벨(# 또는 ##)로 존재하는가? (`# 작업이름`, `## 목표`, `## 진행`, `## 결정`, `## 결과`, `## 다음할일`, `## 산출물`) - '# 작업이름' 부분은 실제 작업 이름으로 대체될 수 있음.
-        2.  **Bullet Point 개수:** `## 산출물` 섹션을 제외한 각 `##` 섹션의 bullet point (`- `) 개수가 2개 이상 5개 이하인가? (0개도 허용 안됨)
-        3.  **산출물 형식:** `## 산출물` 섹션에는 파일 이름만 쉼표로 구분되어 나열되어 있는가? 또는 '없음' 텍스트만 있는가? (bullet point, 경로, 설명 금지)
+        2.  **Bullet Point 개수:** `## 산출물` 섹션을 제외한 각 `##` 섹션의 bullet point (`- `) 개수가 2개 이상 5개 이하인가? (0개도 허용 안됨. 내용 없을 시 '- 없음.'과 같이 2개 이상으로 맞춰야 함)
+        3.  **산출물 형식:** `## 산출물` 섹션에는 (a) 파일 이름들이 쉼표로만 구분되어 나열되어 있거나, (b) **오직 '없음'이라는 두 글자만 정확히 있어야 합니다.** (a)의 경우 bullet point, 경로, 설명 등은 금지됩니다. (b)의 경우 '없음' 외 다른 어떤 텍스트도 없어야 합니다. '없음'이라고 적힌 경우 '설명 포함됨'으로 간주하지 마십시오.
         4.  **금지 요소:** 표, 코드 블록(```), 인라인 코드(`), 이미지, HTML 태그 등 금지된 요소가 포함되지 않았는가?
-        5.  **언어:** 모든 내용이 한국어로 작성되었는가? (코드/파일명 제외)
+        5.  **언어:** 모든 내용이 한국어로 작성되었는가? (코드/파일명, 'Oracle'과 같은 고유명사 제외)
 
         ### 검증 대상 Markdown
         ```markdown
@@ -171,21 +214,26 @@ class OllamaBackend(AIBaseBackend):
         ```
 
         ### 결과 보고
-        - 모든 규칙을 완벽하게 준수하면 **오직 'OK'** 라고만 응답합니다.
-        - 규칙 위반 사항이 **하나라도** 발견되면, 'OK' 대신 **발견된 모든 문제점**을 간결하게 한 줄씩 나열하여 보고합니다. (예: "- ## 결정 섹션 bullet point 1개 (최소 2개 필요)\n- ## 산출물 섹션에 설명 포함됨")
+        - 분석 결과, 모든 규칙을 완벽하게 준수한다고 판단되면, 당신의 전체 응답은 **그 어떤 다른 문자, 설명, 제목, 접두사, 접미사, 줄바꿈도 없이, 정확히 두 글자 'OK' 여야만 합니다.** (따옴표 제외)
+        - 예시: `OK`
+        - 만약 당신의 응답이 'OK' 이외의 다른 어떤 문자(예: '**OK**', 'OK.', '검증 결과: OK' 등)라도 포함하면, 이는 지시 위반으로 간주되어 실패 처리됩니다.
+        - 만약 규칙 위반 사항이 하나라도 발견되면, 당신의 응답에 'OK'라는 단어를 절대로 포함해서는 안 되며, 발견된 문제점들만 한 줄씩 간결하게 나열하십시오. (문제점 보고 시에는 Markdown bullet point `-` 사용 가능)
         """)
         res = self._req(sys_msg, user_msg)
-        
+
         if not res: # AI 응답이 아예 없는 경우
             return False, f"AI 검증 응답 없음 ({self.get_name()})"
 
+        # --- HuggingFace 스타일의 간결한 확인 로직 ---
         stripped_res_upper = res.strip().upper()
         # 응답의 시작 부분이 "**OK**" 또는 "OK"이면 성공으로 간주
         is_ok = stripped_res_upper.startswith("**OK**") or stripped_res_upper.startswith("OK")
-        
+        # --- 수정된 로직 끝 ---
+
         return is_ok, res # 원래 메시지(res)는 그대로 반환
 
     def load_report(self, md: str) -> str:
+        # Using the original prompt
         sys_msg = textwrap.dedent("""
         당신은 동료로부터 프로젝트 상태 보고서를 전달받아 내용을 파악해야 하는 개발자입니다.
         주어진 Markdown 보고서를 주의 깊게 읽고, 이해한 내용을 바탕으로 현재 상황과 즉시 해야 할 일을 요약해주세요.
