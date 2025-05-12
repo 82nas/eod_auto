@@ -168,7 +168,10 @@ class AIProvider:
                     if i == 0 and current_header.startswith("# "):
                         header_correct = True
                     # 나머지 헤더("## 이름 ") 형식 검사
-                    elif i > 0 and current_header.startswith(expected_start_format + " "):
+                    elif i > 0 and (
+                            current_header == expected_start_format or
+                            current_header.startswith(expected_start_format + " ")
+                       ):
                         header_correct = True
 
                     # 형식 검증 실패 시
