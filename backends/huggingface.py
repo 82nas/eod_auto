@@ -91,6 +91,14 @@ class HuggingFaceBackend(AIBaseBackend):
         except (ValueError, json.JSONDecodeError) as e: # Catch JSON parsing or value errors
             raise RuntimeError(f"HF API 응답 처리 오류: {e}") from e
 
+    # --- make_summary, verify_summary, load_report ---
+    # These methods use the same prompts as the Ollama backend.
+    # They just call self._req() which is implemented differently here.
+    # For brevity, we assume the prompt construction logic is identical
+    # and simply call self._req with the constructed prompts.
+    # (Copying the exact prompt construction from ollama.py is recommended
+    # for clarity if maintaining separately).
+
     def make_summary(self, task: str, ctx: str, arts: List[str]) -> str:
         # Identical prompt construction logic as OllamaBackend.make_summary
         sys_msg = textwrap.dedent("""
