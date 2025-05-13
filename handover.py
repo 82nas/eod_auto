@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# handover.py – 인수인계 v1.1.11 (Self-Filling Prompt 통합)
+# handover.py – 인수인계 v1.1.12 (System Instruction 내장 및 AIProvider.make_summary 개선)
 
 from __future__ import annotations
 import os
 import sys
 import datetime
 import json
-import textwrap
+# import textwrap # dedent를 직접 임포트하므로 전체 textwrap 임포트는 불필요할 수 있음
+from textwrap import dedent # dedent 직접 임포트
 import pathlib
 import shutil
 import argparse
@@ -22,7 +23,7 @@ from dotenv import load_dotenv
 # --- 의존성 로드 ---
 try:
     from git import Repo, GitCommandError, InvalidGitRepositoryError, NoSuchPathError, Blob, Commit, HookExecutionError
-    import requests # type: ignore
+    # import requests # 현재 코드에서 직접 사용되지 않는 것으로 보임 (AI 백엔드에서 사용)
     from rich import print, box
     from rich.table import Table
     from rich.prompt import Prompt
@@ -32,7 +33,7 @@ try:
     import markdown2 # type: ignore
 except ImportError as e:
     print(f"[bold red]오류: 필요한 라이브러리가 설치되지 않았습니다.[/]\n{e}")
-    print("팁: [yellow]pip install gitpython requests rich python-dotenv markdown2[/] 명령을 실행하세요.")
+    print("팁: [yellow]pip install gitpython rich python-dotenv markdown2[/] 명령을 실행하세요. (requests는 필요시 AI 백엔드에 설치)")
     sys.exit(1)
 
 load_dotenv()
@@ -40,67 +41,94 @@ load_dotenv()
 BACKEND_DIR = pathlib.Path(__file__).resolve().parent / "backends"
 COMMIT_TAG = "state("
 
-# ✨ AI Handover-Prompt (Self-Filling Edition) - 사용자가 제공한 템플릿
-SELF_FILLING_PROMPT_TEMPLATE = """
+# ----------------------------------------------------------------------
+#  System Instruction (Markdown) – 사용자 제공 Self-Filling Prompt
+# ----------------------------------------------------------------------
+SYSTEM_INSTRUCTION_MD = dedent(
+    """
 # ✨ AI Handover-Prompt (Self-Filling Edition)
 
 **System Instruction (for the AI that will run this prompt)**
 당신은 *“Handover-GPT”*입니다.
-아래 지침에 따라 **대화 기록, 코드 저장소, 커밋 메시지, 작업 로그, 메타데이터** 등 주어진 모든 입력을 스스로 분석하고, 사람이 한 줄도 채우지 않아도 **완전한 인수인계 문서**를 생성해야 합니다.
+아래 지침에 따라 **제공된 컨텍스트 데이터(커밋 메시지, 사용자 추가 정보 등)**를 스스로 분석하고, 사람이 한 줄도 채우지 않아도 **완전한 인수인계 문서**를 생성해야 합니다. (주: 실제 대화 기록, 전체 코드 저장소, 작업 로그, 외부 메타데이터 직접 접근은 현재 이 스크립트의 AI 호출 방식에서는 지원되지 않으며, 요약된 정보가 컨텍스트로 제공됩니다.)
 
 ---
 
-## 1. 작업 기본 정보 (Context) — *자동 채우기*
-- **작업 이름/ID**: 대화·커밋 메시지·브랜치명에서 가장 반복적으로 등장하거나 제목 규칙(예: `[YYYY-MM-DD]`)에 맞는 스트링을 추출
-- **작업 수행 기간**: 최초·최종 타임스탬프 자동 탐지 → `YYYY-MM-DD ~ YYYY-MM-DD` 형식
-- **담당자**: 작성자·커밋 author·대화 속 “@이름” 패턴에서 추정
-- **관련 프로젝트/서비스**: 레포 루트 디렉터리 이름 또는 회의록·대화 중 `프로젝트:` 앞 단어
+## 1. 작업 기본 정보 (Context) — *AI가 아래 제공된 정보를 바탕으로 자동 채우기 시도*
+- **작업 이름/ID**: (외부에서 `task`로 주어지는 작업 이름을 사용하거나, 커밋 메시지 등에서 가장 적절한 내용을 추출)
+- **작업 수행 기간**: (제공된 Git 커밋 로그의 최초/최종 날짜를 기반으로 자동 탐지 시도) → `YYYY-MM-DD ~ YYYY-MM-DD` 형식
+- **담당자**: (제공된 Git 커밋 로그의 author 정보를 기반으로 추정)
+- **관련 프로젝트/서비스**: (스크립트 실행 위치의 Git 저장소 이름 또는 사용자가 명시한 프로젝트명으로 추정)
 
 ## 2. AI의 역할 및 목표 (Role & Goal)
 > “너는 수집한 모든 정보를 요약·정리해 **다음 담당자가 5분 안에 업무 파악**이 가능하도록 Markdown 형식 인수인계 문서를 작성한다.”
 
-- 목표: 섹션 3~5에서 요구하는 핵심 정보를 누락 없이, 중복 없이, **불릿+서술 혼합** 스타일로 정리
+- 목표: 아래 섹션 3의 각 항목과 섹션 4, 5의 요구사항에 맞춰 핵심 정보를 누락 없이, 중복 없이, **불릿+서술 혼합** 스타일로 정리한다.
 
-## 3. 작업 상세 내용 (Input Data → AI가 추출)
+## 3. 작업 상세 내용 (Input Data → AI가 제공된 컨텍스트에서 추출)
+
+**주어진 컨텍스트:**
+스크립트로부터 다음 형식의 정보가 제공될 것입니다:
+```
+### [작업 이름] (사용자가 입력한 작업 이름)
+
+### 최근 Git 활동 요약:
+- 날짜: YYYY-MM-DD, 작성자: AuthorName, 제목: Commit Subject (해시: short_hash)
+  변경 파일:
+    - path/to/file1.py (변경 라인: N, 추가: X, 삭제: Y)
+    - path/to/file2.java (변경 라인: M, 추가: A, 삭제: B)
+- (다른 커밋 정보들...)
+
+### 사용자 추가 컨텍스트:
+(사용자가 입력한 추가적인 설명, 결정 배경, 미팅 요약 등)
+
+### 현재 아티팩트 파일 목록:
+(file1.zip, report.pdf 등)
+```
+
+**AI 추출 지침:**
+
 ### 3.1 주요 목표
-- 대화·이슈·PR 설명에서 **‘목표·Purpose·Goal’** 키워드 인접 문장 최대 3개 추출·요약
+- "사용자 추가 컨텍스트" 또는 "최근 Git 활동 요약"의 커밋 메시지에서 **‘목표·Purpose·Goal’** 관련 내용을 찾아 최대 3개 추출·요약. 명시적 언급이 없으면 작업 이름과 커밋 내용으로 추론.
 
 ### 3.2 진행 과정 & 변경 사항
-- 시간순 커밋 로그 + 대화 타임라인을 결합
-- 각 날짜별 **주요 액션·이슈·해결**을 불릿으로 정리
-- 코드 diff 감지 시 “파일명(라인)” → 변경 요약 1줄
+- "최근 Git 활동 요약"의 시간순 커밋 로그를 바탕으로 각 날짜별 **주요 액션(커밋 제목)과 변경된 파일(주요 파일 1~2개 명시)**을 불릿으로 정리.
+- 커밋 제목에 이슈 번호나 PR 번호가 있다면 함께 언급.
 
 ### 3.3 핵심 결정 사항 & 이유
-- “결정/결론/choose/채택” 등의 키워드 근처 문장 수집
-- 대안·이유·배경 키워드(`because`, `이유`, `why`) 포함 문장 연결 요약
+- "사용자 추가 컨텍스트"에서 “결정/결론/choose/채택” 등의 키워드 및 그 이유/배경을 찾아 요약.
+- 정보가 부족하면, 주요 커밋(예: Refactor, Design, Add Feature 등)의 내용을 바탕으로 추론하여 기술.
 
 ### 3.4 기술 스택 & 환경
-- `requirements.lock`, `package.json`, `Dockerfile`, `.tool-versions` 등에서 버전과 스택 자동 스캔
-- 실행 OS·CI 도구는 파이프라인 설정(yml)에서 추출
+- "사용자 추가 컨텍스트"에 명시된 내용이 있다면 우선 사용.
+- (AI의 직접적인 파일 스캔은 불가하므로) 만약 커밋된 파일명에 `requirements.txt`, `package.json`, `Dockerfile`, `pom.xml`, `build.gradle` 등이 보이면 해당 파일이 기술 스택 정보를 포함할 수 있다고 언급.
+- CI/CD 도구나 OS 정보는 "사용자 추가 컨텍스트"에서 찾아보고, 없으면 "명시된 정보 없음"으로 표기.
 
 ### 3.5 데이터 정보 (선택)
-- `migrations`, `schema`, `*.sql` diff에서 **신규/변경 테이블·컬럼** 요약
-- 대량 데이터 마이그레이션 로그가 있으면 경로·레코드 수 포함
+- "사용자 추가 컨텍스트" 또는 커밋 메시지/변경된 파일명에서 `migrations`, `schema`, `*.sql` 등의 키워드가 보이면 관련 내용을 요약.
+- 없으면 "해당 사항 없음" 또는 "명시된 정보 없음"으로 표기.
 
 ### 3.6 결과 & 산출물
-- 빌드 아티팩트·릴리스 태그·배포 로그에서 URL·파일명 수집
-- 테스트 리포트(pass rate, coverage)·벤치마크 결과 요약
+- "사용자 추가 컨텍스트"에 명시된 결과 또는 성과를 요약.
+- "현재 아티팩트 파일 목록"에 있는 파일들을 나열.
+- Git 커밋 로그에서 릴리스 태그나 빌드 관련 메시지가 보이면 언급.
 
 ### 3.7 미해결 문제 / 주의 사항
-- TODO/FIXME 주석, 이슈 open 상태, ‘남은 과제/버그’ 키워드 근처 문장 모아 요약
+- "사용자 추가 컨텍스트"에서 ‘TODO/FIXME/주의/버그/미해결’ 등의 키워드를 찾아 요약.
+- 커밋 메시지에서 관련 내용을 추론.
 
 ### 3.8 다음 작업자 제언
-- README·CONTRIBUTING·comment 중 “Tip/주의/참고” 문장 추출
-- 연락처 패턴(email, Slack/#channel) 자동 포함
+- "사용자 추가 컨텍스트"에서 "Tip/주의/참고/연락처" 등의 정보를 찾아 정리.
+- 없으면 "특별한 제언 없음"으로 표기.
 
 ## 4. 출력 형식
 - **문서 형식**: Markdown
-- **헤더 구조** (여기에 구체적인 헤더 구조 예시를 명시하는 것이 좋습니다. 예: 아래)
+- **헤더 구조** (아래 구조를 정확히 따를 것. 대괄호 안은 AI가 채울 내용):
     # [작업 이름/ID] - 인수인계 문서
     ## 1. 작업 개요
-    ### 1.1. 작업 기간
-    ### 1.2. 담당자
-    ### 1.3. 관련 프로젝트/서비스
+    ### 1.1. 작업 기간: [YYYY-MM-DD ~ YYYY-MM-DD]
+    ### 1.2. 담당자: [이름]
+    ### 1.3. 관련 프로젝트/서비스: [프로젝트명]
     ## 2. 주요 목표
     ## 3. 진행 과정 및 주요 변경 사항
     ## 4. 핵심 결정 사항 및 그 이유
@@ -110,23 +138,25 @@ SELF_FILLING_PROMPT_TEMPLATE = """
     ## 8. 미해결 문제 및 주의 사항
     ## 9. 다음 작업자를 위한 제언
 - 각 섹션:
-- ‘주요 변경 사항’ → **시간순 불릿**
-- ‘결정 사항’ → 서술형(결정 ▶ 이유 ▶ 대안)
-- 첫 등장 용어는 `( )`에 짧은 정의
+- ‘3. 진행 과정 및 주요 변경 사항’ → **시간순 불릿** (날짜별 그룹화 권장)
+- ‘4. 핵심 결정 사항 및 그 이유’ → 서술형 (결정 ▶ 이유 ▶ (있다면) 대안)
+- 첫 등장하는 주요 기술 용어는 `( )` 안에 짧은 정의 또는 영문 원어 병기.
 
 ## 5. 제약 & 필터
-- 언어: **한국어**, 기술어는 원문 병기
-- 민감 정보(토큰·비밀번호·개인 데이터)는 `***` 로 마스킹
-- 코드 본문 대신 Git 경로 링크 (`[파일 보기]`) 표기
-- 총 길이 ≦ 2 A4 (약 150 줄)로 요약
+- 언어: **한국어**를 기본으로 사용하되, 기술 용어, 라이브러리명, 파일명 등은 원문(주로 영어)을 그대로 사용하거나 병기.
+- 민감 정보(API 키, 비밀번호, 개인 식별 정보 등)는 절대 포함하지 말고, 발견 시 `[민감 정보 마스킹됨]` 또는 `***`로 표기.
+- 코드 스니펫은 핵심 로직을 설명하기 위한 최소한의 예시만 허용 (5줄 이내). 긴 코드는 Git 저장소 내 파일 경로로 안내.
+- 총 길이는 너무 길지 않게, 핵심 정보 위주로 요약 (예: Markdown 기준 약 150~200줄 내외 목표).
 
 ---
 
-### ✅ 실행 단계 (AI가 수행할 내부 프로세스)
-1.  **모든 입력 소스**(대화, git log -n 1000, 파일 헤더 등)를 파싱. (현재 스크립트는 Git 정보와 사용자 추가 컨텍스트를 제공함)
-2.  위 규칙에 따라 섹션별로 정보 추출·정제.
-3.  지정 헤더 구조로 Markdown 문서 출력.
+### ✅ 실행 단계 (AI가 내부적으로 수행할 프로세스)
+1.  **제공된 컨텍스트 데이터**(작업 이름, 최근 Git 활동 요약, 사용자 추가 컨텍스트, 아티팩트 파일 목록)를 면밀히 분석합니다.
+2.  위 "3. 작업 상세 내용"의 각 항목별 **AI 추출 지침**에 따라 필요한 정보를 추출하고 정제합니다.
+3.  "4. 출력 형식"에 명시된 **헤더 구조**와 스타일 가이드, 그리고 "5. 제약 & 필터"를 **반드시 준수**하여 Markdown 문서를 생성합니다.
 """
+).strip()
+
 
 # --- AI 백엔드 로딩 ---
 AIBaseBackend = None
@@ -193,9 +223,21 @@ class AIProvider:
             self.backend = None
 
     def make_summary(self, task: str, ctx: str, arts: List[str]) -> str:
-        if not self.backend: raise RuntimeError("AI 백엔드가 설정되지 않아 요약을 생성할 수 없습니다.")
-        # task는 AI에게 전달되는 ctx 내부의 템플릿에서 작업 이름/ID로 활용될 수 있음
-        return self.backend.make_summary(task, ctx, arts)
+        if not self.backend:
+            raise RuntimeError("AI 백엔드가 설정되지 않아 요약을 생성할 수 없습니다.")
+
+        # AI 입력은 ⓐ시스템지침(템플릿) ⓑ작업명 ⓒ컨텍스트(데이터) 순으로 합쳐 전달
+        # AI 백엔드의 make_summary는 이제 이 merged_ctx를 전체 "사용자 프롬프트"로 받게 됨
+        # AI 백엔드의 시스템 프롬프트는 "너는 Handover-GPT이며, 사용자 프롬프트로 전달된 지침 템플릿과 데이터를 기반으로 문서를 작성하라"는 역할만 부여.
+        merged_ctx = (
+            f"{SYSTEM_INSTRUCTION_MD}\n\n"
+            f"### [작업 이름 (Handover 스크립트에서 전달됨)]\n{task}\n\n" # 작업 이름을 명시적으로 전달
+            f"--- 제공된 데이터 (아래 내용을 위 템플릿에 맞춰 채워주세요) ---\n\n"
+            f"{ctx}" # ctx는 Git 요약 + 사용자 추가 컨텍스트를 포함
+        )
+        # AI 백엔드의 make_summary에는 task를 별도로 전달하지 않고, merged_ctx에 포함된 작업 이름을 활용하도록 유도
+        # 또는, AI 백엔드가 task와 merged_ctx를 별도로 받아 처리하도록 할 수도 있음 (현재는 merged_ctx에 통합)
+        return self.backend.make_summary(task, merged_ctx, arts) # task는 여전히 전달 (AI 백엔드에서 활용 여부 결정)
 
     def verify_summary(self, md: str) -> Tuple[bool, str]:
         if not self.backend: raise RuntimeError("AI 백엔드가 설정되지 않아 요약을 검증할 수 없습니다.")
@@ -216,24 +258,18 @@ class AIProvider:
             print("[DEBUG] Backend reported OK. Starting internal structure checks...")
             lines = md.strip().split('\n')
             headers = [l.strip() for l in lines if l.startswith('#')]
-            # SELF_FILLING_PROMPT_TEMPLATE에 정의된 헤더 구조와 일치하는지 확인해야 함
-            # 여기서는 기본적인 7개 헤더 구조를 유지 (템플릿에 따라 유연하게 변경 필요 가능성)
-            required_headers_structure = ["#", "## 목표", "## 진행", "## 결정", "## 결과", "## 다음할일", "## 산출물"]
-            # 또는 템플릿에서 헤더 구조를 파싱하여 required_headers_structure를 동적으로 생성할 수도 있음
-            print(f"[DEBUG] Internal Check - Found Headers: {headers}")
-
-            # 내부 검증 로직은 AI가 템플릿을 얼마나 잘 따랐는지에 따라 달라질 수 있음
-            # 우선 기본적인 헤더 개수만 확인하거나, AI 백엔드의 검증을 더 신뢰할 수 있음
-            if not headers or not headers[0].startswith("# "): # 최소한 제목 헤더는 있어야 함
+            
+            # Self-Filling Prompt 템플릿의 "4. 출력 형식"에 정의된 헤더 구조를 따라야 함
+            # 여기서는 AI가 템플릿을 잘 따랐다고 가정하고, 기본적인 검증만 수행
+            # (예: 최소한 제목 헤더가 존재하는지)
+            if not headers or not headers[0].startswith("# "):
                  is_ok = False
-                 msg = "문서에 제목 헤더(#)가 없거나 형식이 잘못되었습니다."
+                 msg = "AI 생성 문서에 제목 헤더(#)가 없거나 형식이 잘못되었습니다."
                  print(f"[DEBUG] Internal Check FAILED: {msg}")
-
-            # (선택적) 더 상세한 내부 구조 검증 (예: 필수 헤더 존재 여부 등)
-            # if is_ok and len(headers) < 3: # 예시: 최소 3개 이상의 헤더 필요
-            #     is_ok = False
-            #     msg = f"필수 헤더 개수가 부족합니다 (현재 {len(headers)}개)."
-            #     print(f"[DEBUG] Internal Check FAILED: {msg}")
+            # else:
+                # 더 정교한 검증: 템플릿의 헤더 구조와 실제 생성된 헤더를 비교
+                # required_header_prefixes = ["# ", "## 1. ", "### 1.1. ", ...] # 템플릿에서 추출 또는 정의
+                # ... (상세 검증 로직) ...
 
             if is_ok:
                 print("[DEBUG] Internal structure checks PASSED (or basic check passed).")
@@ -294,7 +330,7 @@ class GitRepo:
         if not self.repo: return []
         commits_data = []
         try:
-            for commit in self.repo.iter_commits(max_count=num_commits): # 기본 최신순
+            for commit in self.repo.iter_commits(max_count=num_commits):
                 commits_data.append({
                     "hash": commit.hexsha,
                     "author": commit.author.name if commit.author else "N/A",
@@ -749,8 +785,7 @@ class Handover:
                     default_task_name = self.git.repo.head.commit.summary
             task_name_input = self.ui.task_name(default=default_task_name)
 
-            # 1. Git 정보 수집
-            git_commits_info_str = "최근 Git 활동 정보 없음." # 기본값
+            git_commits_info_str = "최근 Git 활동 정보 없음."
             if self.git:
                 self.ui.console.print("\n[dim]최근 Git 커밋 정보를 수집 중입니다...[/dim]")
                 num_commits_to_fetch = int(os.getenv("HANDOVER_N_COMMITS", 10))
@@ -758,13 +793,14 @@ class Handover:
                 
                 if recent_commits_data:
                     formatted_commits = []
-                    for commit in reversed(recent_commits_data): # 오래된 것부터 (시간 순)
+                    # AI가 시간순으로 처리하기 좋도록 오래된 커밋부터 전달
+                    for commit in reversed(recent_commits_data):
                         commit_line = f"- 날짜: {commit['date']}, 작성자: {commit['author']}, 제목: {commit['subject']} (해시: {commit['hash'][:7]})"
                         changes = commit.get("changes", {})
                         files = changes.get("files", [])
                         if files:
                             commit_line += "\n  변경 파일:"
-                            for f_info in files[:3]:
+                            for f_info in files[:3]: # 예시로 최대 3개 파일 정보만
                                 commit_line += f"\n    - {f_info['file']} (변경 라인: {f_info.get('changed_lines', 'N/A')}, 추가: {f_info.get('insertions', 'N/A')}, 삭제: {f_info.get('deletions', 'N/A')})"
                             if len(files) > 3:
                                 commit_line += f"\n    - ... (외 {len(files) - 3}개 파일 변경)"
@@ -774,38 +810,34 @@ class Handover:
                 else:
                     self.ui.console.print("[yellow]Git 커밋 정보를 수집하지 못했거나, 최근 커밋이 없습니다.[/yellow]")
             
-            # 2. 사용자 추가 컨텍스트 입력
             user_additional_context = self.ui.multiline(
-                "추가 컨텍스트 또는 강조 사항 (선택 사항)",
+                "추가 컨텍스트 또는 강조 사항 (선택 사항, AI가 템플릿의 다른 부분을 채우는 데 사용)",
                 help_text="AI가 Git 정보 외에 참고할 내용을 입력하세요. (예: 주요 결정 배경, 미팅 요약, Self-Filling Prompt의 다른 섹션 내용 등)"
             )
             
-            # 3. AI에게 전달할 전체 컨텍스트 구성
-            # Self-Filling Prompt 템플릿과 수집된 데이터를 결합
-            ai_input_context = SELF_FILLING_PROMPT_TEMPLATE
-            ai_input_context += "\n\n--- 제공된 데이터 (아래 내용을 위 템플릿에 맞춰 채워주세요) ---\n\n"
-            ai_input_context += "### 최근 Git 활동 요약:\n"
-            ai_input_context += git_commits_info_str
-            
+            # AI에게 전달할 전체 컨텍스트: 시스템 지침(템플릿) + 작업명 + 데이터(Git 요약 + 사용자 추가 컨텍스트)
+            # AIProvider.make_summary 내부에서 SYSTEM_INSTRUCTION_MD와 task, ctx를 합쳐서 최종 프롬프트 구성
+            # ctx 부분만 데이터로 구성
+            data_context_for_ai = "### 최근 Git 활동 요약:\n"
+            data_context_for_ai += git_commits_info_str
             if user_additional_context:
-                ai_input_context += "\n\n### 사용자 추가 컨텍스트:\n" + user_additional_context
+                data_context_for_ai += "\n\n### 사용자 추가 컨텍스트:\n" + user_additional_context
             
-            # 현재 아티팩트 파일 목록 (AI에게 참고용으로 전달)
             current_artifact_files = []
             if self.art_dir.exists() and self.art_dir.is_dir():
                 current_artifact_files = [f.name for f in self.art_dir.iterdir() if f.is_file()]
 
-            # 4. AI 호출하여 초안 생성
             self.ui.console.print("\n[bold yellow]AI가 인수인계 문서 초안을 생성 중입니다... (Self-Filling Prompt 및 데이터 기반)[/bold yellow]")
             
+            # AIProvider.make_summary는 이제 task와 data_context_for_ai를 받음
+            # 내부적으로 SYSTEM_INSTRUCTION_MD와 결합됨
             generated_markdown_draft = self.ai.make_summary(
-                task=task_name_input, # 작업 이름은 AI가 템플릿 내에서 활용하도록 전달
-                ctx=ai_input_context,  # 템플릿 + 데이터
-                arts=current_artifact_files 
+                task=task_name_input, 
+                ctx=data_context_for_ai, 
+                arts=current_artifact_files
             )
             self.ui.panel(generated_markdown_draft, "AI 생성 인수인계 문서 초안")
 
-            # 5. 사용자 최종 편집
             self.ui.console.print("\n[bold green]AI가 생성한 초안입니다. 내용을 검토하고 최종적으로 수정/완성해주세요.[/bold green]")
             final_markdown_content = self.ui.multiline(
                 "최종 인수인계 문서 내용 편집",
@@ -816,7 +848,6 @@ class Handover:
             if not final_markdown_content.strip():
                 self.ui.error("인수인계 문서 내용이 비어있어 저장을 취소합니다."); return
 
-            # 6. (선택적) 최종 내용 AI 재검증
             self.ui.console.print("[bold yellow]수정된 내용을 AI가 다시 검증 중입니다...[/bold yellow]")
             is_valid_summary, validation_message = self.ai.verify_summary(final_markdown_content)
             if not is_valid_summary:
@@ -824,7 +855,6 @@ class Handover:
             else:
                 self.ui.notify("AI 최종 검증 통과!", style="green")
 
-            # 7. 파일 저장 및 Git 커밋
             saved_state_files, artifact_snapshot_dir = Serializer.save_state(final_markdown_content, task_name_input, self.state_dir, self.art_dir, self.app_root)
             
             if not self.git:
@@ -922,7 +952,7 @@ def main_cli_entry_point():
         print(f"[red]오류: 필수 디렉토리 생성 실패 ({app_state_dir} 또는 {app_art_dir}): {e}[/]")
         sys.exit(1)
 
-    parser = argparse.ArgumentParser(description="AI 기반 프로젝트 인수인계 상태 관리 도구 (v1.1.11 - Self-Filling Prompt)", formatter_class=argparse.RawTextHelpFormatter)
+    parser = argparse.ArgumentParser(description="AI 기반 프로젝트 인수인계 상태 관리 도구 (v1.1.12 - Self-Filling Prompt)", formatter_class=argparse.RawTextHelpFormatter)
     
     backend_choices_list = list(available_backends.keys()) if available_backends else []
     default_be = "none" 
@@ -970,7 +1000,7 @@ def main_cli_entry_point():
         elif args.backend not in available_backends and args.backend != "none":
             UI.error(f"'{args.command}' 명령 실행 불가: 선택된 AI 백엔드 '{args.backend}'를 로드할 수 없거나 초기화에 실패했습니다."); sys.exit(1)
 
-    print(f"[bold underline]Handover 스크립트 v1.1.11 (Self-Filling Prompt)[/]")
+    print(f"[bold underline]Handover 스크립트 v1.1.12 (Self-Filling Prompt)[/]")
     if is_git_repo_at_cli_root: print(f"[dim]프로젝트 루트 (Git): {cli_root_path}[/dim]")
     else: print(f"[dim]현재 작업 폴더 (Git 저장소 아님): {cli_root_path}[/dim]")
 
