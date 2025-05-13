@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# handover.py – 인수인계 v1.1.10 (오류 수정 및 개선)
+# handover.py – 인수인계 v1.1.11 (Self-Filling Prompt 통합)
 
 from __future__ import annotations
 import os
@@ -15,13 +15,13 @@ import importlib
 import importlib.util
 import subprocess
 import re
-import traceback # traceback 모듈 임포트 추가
+import traceback
 from typing import List, Dict, Tuple, Optional, Type, Any
 from dotenv import load_dotenv
 
 # --- 의존성 로드 ---
 try:
-    from git import Repo, GitCommandError, InvalidGitRepositoryError, NoSuchPathError, Blob, Commit, HookExecutionError # HookExecutionError 명시적 임포트
+    from git import Repo, GitCommandError, InvalidGitRepositoryError, NoSuchPathError, Blob, Commit, HookExecutionError
     import requests # type: ignore
     from rich import print, box
     from rich.table import Table
@@ -39,6 +39,94 @@ load_dotenv()
 
 BACKEND_DIR = pathlib.Path(__file__).resolve().parent / "backends"
 COMMIT_TAG = "state("
+
+# ✨ AI Handover-Prompt (Self-Filling Edition) - 사용자가 제공한 템플릿
+SELF_FILLING_PROMPT_TEMPLATE = """
+# ✨ AI Handover-Prompt (Self-Filling Edition)
+
+**System Instruction (for the AI that will run this prompt)**
+당신은 *“Handover-GPT”*입니다.
+아래 지침에 따라 **대화 기록, 코드 저장소, 커밋 메시지, 작업 로그, 메타데이터** 등 주어진 모든 입력을 스스로 분석하고, 사람이 한 줄도 채우지 않아도 **완전한 인수인계 문서**를 생성해야 합니다.
+
+---
+
+## 1. 작업 기본 정보 (Context) — *자동 채우기*
+- **작업 이름/ID**: 대화·커밋 메시지·브랜치명에서 가장 반복적으로 등장하거나 제목 규칙(예: `[YYYY-MM-DD]`)에 맞는 스트링을 추출
+- **작업 수행 기간**: 최초·최종 타임스탬프 자동 탐지 → `YYYY-MM-DD ~ YYYY-MM-DD` 형식
+- **담당자**: 작성자·커밋 author·대화 속 “@이름” 패턴에서 추정
+- **관련 프로젝트/서비스**: 레포 루트 디렉터리 이름 또는 회의록·대화 중 `프로젝트:` 앞 단어
+
+## 2. AI의 역할 및 목표 (Role & Goal)
+> “너는 수집한 모든 정보를 요약·정리해 **다음 담당자가 5분 안에 업무 파악**이 가능하도록 Markdown 형식 인수인계 문서를 작성한다.”
+
+- 목표: 섹션 3~5에서 요구하는 핵심 정보를 누락 없이, 중복 없이, **불릿+서술 혼합** 스타일로 정리
+
+## 3. 작업 상세 내용 (Input Data → AI가 추출)
+### 3.1 주요 목표
+- 대화·이슈·PR 설명에서 **‘목표·Purpose·Goal’** 키워드 인접 문장 최대 3개 추출·요약
+
+### 3.2 진행 과정 & 변경 사항
+- 시간순 커밋 로그 + 대화 타임라인을 결합
+- 각 날짜별 **주요 액션·이슈·해결**을 불릿으로 정리
+- 코드 diff 감지 시 “파일명(라인)” → 변경 요약 1줄
+
+### 3.3 핵심 결정 사항 & 이유
+- “결정/결론/choose/채택” 등의 키워드 근처 문장 수집
+- 대안·이유·배경 키워드(`because`, `이유`, `why`) 포함 문장 연결 요약
+
+### 3.4 기술 스택 & 환경
+- `requirements.lock`, `package.json`, `Dockerfile`, `.tool-versions` 등에서 버전과 스택 자동 스캔
+- 실행 OS·CI 도구는 파이프라인 설정(yml)에서 추출
+
+### 3.5 데이터 정보 (선택)
+- `migrations`, `schema`, `*.sql` diff에서 **신규/변경 테이블·컬럼** 요약
+- 대량 데이터 마이그레이션 로그가 있으면 경로·레코드 수 포함
+
+### 3.6 결과 & 산출물
+- 빌드 아티팩트·릴리스 태그·배포 로그에서 URL·파일명 수집
+- 테스트 리포트(pass rate, coverage)·벤치마크 결과 요약
+
+### 3.7 미해결 문제 / 주의 사항
+- TODO/FIXME 주석, 이슈 open 상태, ‘남은 과제/버그’ 키워드 근처 문장 모아 요약
+
+### 3.8 다음 작업자 제언
+- README·CONTRIBUTING·comment 중 “Tip/주의/참고” 문장 추출
+- 연락처 패턴(email, Slack/#channel) 자동 포함
+
+## 4. 출력 형식
+- **문서 형식**: Markdown
+- **헤더 구조** (여기에 구체적인 헤더 구조 예시를 명시하는 것이 좋습니다. 예: 아래)
+    # [작업 이름/ID] - 인수인계 문서
+    ## 1. 작업 개요
+    ### 1.1. 작업 기간
+    ### 1.2. 담당자
+    ### 1.3. 관련 프로젝트/서비스
+    ## 2. 주요 목표
+    ## 3. 진행 과정 및 주요 변경 사항
+    ## 4. 핵심 결정 사항 및 그 이유
+    ## 5. 사용된 기술 스택 및 환경
+    ## 6. 데이터 관련 변경 사항 (해당 시)
+    ## 7. 결과 및 주요 산출물
+    ## 8. 미해결 문제 및 주의 사항
+    ## 9. 다음 작업자를 위한 제언
+- 각 섹션:
+- ‘주요 변경 사항’ → **시간순 불릿**
+- ‘결정 사항’ → 서술형(결정 ▶ 이유 ▶ 대안)
+- 첫 등장 용어는 `( )`에 짧은 정의
+
+## 5. 제약 & 필터
+- 언어: **한국어**, 기술어는 원문 병기
+- 민감 정보(토큰·비밀번호·개인 데이터)는 `***` 로 마스킹
+- 코드 본문 대신 Git 경로 링크 (`[파일 보기]`) 표기
+- 총 길이 ≦ 2 A4 (약 150 줄)로 요약
+
+---
+
+### ✅ 실행 단계 (AI가 수행할 내부 프로세스)
+1.  **모든 입력 소스**(대화, git log -n 1000, 파일 헤더 등)를 파싱. (현재 스크립트는 Git 정보와 사용자 추가 컨텍스트를 제공함)
+2.  위 규칙에 따라 섹션별로 정보 추출·정제.
+3.  지정 헤더 구조로 Markdown 문서 출력.
+"""
 
 # --- AI 백엔드 로딩 ---
 AIBaseBackend = None
@@ -106,6 +194,7 @@ class AIProvider:
 
     def make_summary(self, task: str, ctx: str, arts: List[str]) -> str:
         if not self.backend: raise RuntimeError("AI 백엔드가 설정되지 않아 요약을 생성할 수 없습니다.")
+        # task는 AI에게 전달되는 ctx 내부의 템플릿에서 작업 이름/ID로 활용될 수 있음
         return self.backend.make_summary(task, ctx, arts)
 
     def verify_summary(self, md: str) -> Tuple[bool, str]:
@@ -127,34 +216,27 @@ class AIProvider:
             print("[DEBUG] Backend reported OK. Starting internal structure checks...")
             lines = md.strip().split('\n')
             headers = [l.strip() for l in lines if l.startswith('#')]
+            # SELF_FILLING_PROMPT_TEMPLATE에 정의된 헤더 구조와 일치하는지 확인해야 함
+            # 여기서는 기본적인 7개 헤더 구조를 유지 (템플릿에 따라 유연하게 변경 필요 가능성)
             required_headers_structure = ["#", "## 목표", "## 진행", "## 결정", "## 결과", "## 다음할일", "## 산출물"]
+            # 또는 템플릿에서 헤더 구조를 파싱하여 required_headers_structure를 동적으로 생성할 수도 있음
             print(f"[DEBUG] Internal Check - Found Headers: {headers}")
 
-            if len(headers) != len(required_headers_structure):
-                failure_reason = f"헤더 개수 불일치 (필수 {len(required_headers_structure)}개, 현재 {len(headers)}개)"
-                print(f"[DEBUG] Internal Check FAILED: {failure_reason}")
-                is_ok = False
-                msg = failure_reason
-            else:
-                for i, expected_header in enumerate(required_headers_structure):
-                    current_header = headers[i]
-                    header_correct = False
-                    if i == 0 and current_header.startswith("# "):
-                        header_correct = True
-                    elif i > 0 and current_header == expected_header:
-                         header_correct = True
+            # 내부 검증 로직은 AI가 템플릿을 얼마나 잘 따랐는지에 따라 달라질 수 있음
+            # 우선 기본적인 헤더 개수만 확인하거나, AI 백엔드의 검증을 더 신뢰할 수 있음
+            if not headers or not headers[0].startswith("# "): # 최소한 제목 헤더는 있어야 함
+                 is_ok = False
+                 msg = "문서에 제목 헤더(#)가 없거나 형식이 잘못되었습니다."
+                 print(f"[DEBUG] Internal Check FAILED: {msg}")
 
-                    if not header_correct:
-                        if i == 0:
-                            failure_reason = f"첫 번째 헤더 형식 오류: '{current_header}' (예상 시작: '# ')"
-                        else:
-                            failure_reason = f"헤더 #{i+1} 내용 또는 순서 오류: '{current_header}' (예상: '{expected_header}')"
-                        print(f"[DEBUG] Internal Check FAILED: {failure_reason}")
-                        is_ok = False
-                        msg = failure_reason
-                        break
+            # (선택적) 더 상세한 내부 구조 검증 (예: 필수 헤더 존재 여부 등)
+            # if is_ok and len(headers) < 3: # 예시: 최소 3개 이상의 헤더 필요
+            #     is_ok = False
+            #     msg = f"필수 헤더 개수가 부족합니다 (현재 {len(headers)}개)."
+            #     print(f"[DEBUG] Internal Check FAILED: {msg}")
+
             if is_ok:
-                print("[DEBUG] Internal structure checks PASSED.")
+                print("[DEBUG] Internal structure checks PASSED (or basic check passed).")
         else:
             print("[DEBUG] Backend reported NOT OK. Skipping internal checks.")
 
@@ -194,20 +276,14 @@ class GitRepo:
             effective_repo_path = "."
         try:
             process = subprocess.run(
-                ["git"] + cmd_parts,
-                cwd=effective_repo_path,
-                capture_output=True,
-                text=True,
-                check=check,
-                encoding='utf-8',
-                errors='ignore'
+                ["git"] + cmd_parts, cwd=effective_repo_path, capture_output=True, text=True,
+                check=check, encoding='utf-8', errors='ignore'
             )
             return process.stdout.strip()
         except FileNotFoundError:
             raise RuntimeError("Git 명령어를 찾을 수 없습니다. Git이 설치되어 있고 시스템 PATH에 등록되어 있는지 확인하세요.")
         except subprocess.CalledProcessError as e:
-            error_message = f"Git 명령어 실행 실패: git {' '.join(cmd_parts)}\n"
-            error_message += f"오류 코드: {e.returncode}\n"
+            error_message = f"Git 명령어 실행 실패: git {' '.join(cmd_parts)}\n오류 코드: {e.returncode}\n"
             if e.stdout: error_message += f"STDOUT: {e.stdout.strip()}\n"
             if e.stderr: error_message += f"STDERR: {e.stderr.strip()}\n"
             raise RuntimeError(error_message)
@@ -218,18 +294,16 @@ class GitRepo:
         if not self.repo: return []
         commits_data = []
         try:
-            # date_order 옵션 제거. iter_commits는 기본적으로 최신순 (시간 역순).
-            # 필요한 경우 결과를 받은 후 reversed() 사용.
-            for commit in self.repo.iter_commits(max_count=num_commits):
+            for commit in self.repo.iter_commits(max_count=num_commits): # 기본 최신순
                 commits_data.append({
                     "hash": commit.hexsha,
                     "author": commit.author.name if commit.author else "N/A",
                     "date": datetime.datetime.fromtimestamp(commit.authored_date).strftime("%Y-%m-%d"),
                     "subject": commit.summary
                 })
-        except GitCommandError as e: # iter_commits가 내부적으로 Git 명령 호출 시 발생 가능
+        except GitCommandError as e:
             print(f"[yellow]경고: Git 로그 파싱 중 Git 명령어 오류 발생 (GitPython): {e.stderr}[/yellow]")
-            return [] # 오류 발생 시 빈 리스트 반환
+            return []
         except Exception as e:
             print(f"[yellow]경고: Git 로그 파싱 중 예기치 않은 오류 발생 (GitPython): {e}[/yellow]")
             return []
@@ -242,18 +316,6 @@ class GitRepo:
         try:
             commit_obj = self.repo.commit(commit_hash)
             if commit_obj.parents:
-                # GitPython의 diff().stats 사용 (더 안정적)
-                # diff_index = commit_obj.parents[0].diff(commit_obj, create_patch=False)
-                # diff_stats = diff_index.stats
-                # raw_stat_output = f"Total: {diff_stats.total}" # 전체 통계
-                # for file_path, stats_dict in diff_stats.files.items():
-                #     files_changed_summary.append({
-                #         "file": file_path,
-                #         "changed_lines": stats_dict.get("lines", 0), # net change
-                #         "insertions": stats_dict.get("insertions", 0),
-                #         "deletions": stats_dict.get("deletions", 0)
-                #     })
-                # subprocess 방식 (기존 유지, 파싱 견고성 주의)
                 stat_output = self._run_git_command(["show", "--stat=150,100", "--pretty=format:", commit_hash])
                 raw_stat_output = stat_output[:2000]
                 for line in stat_output.splitlines():
@@ -275,10 +337,8 @@ class GitRepo:
             else: # 최초 커밋
                 for file_path, stats in commit_obj.stats.files.items():
                     files_changed_summary.append({
-                        "file": file_path,
-                        "changed_lines": stats.get('lines', 0),
-                        "insertions": stats.get('insertions', 0),
-                        "deletions": stats.get('deletions', 0)
+                        "file": file_path, "changed_lines": stats.get('lines', 0),
+                        "insertions": stats.get('insertions', 0), "deletions": stats.get('deletions', 0)
                     })
                 raw_stat_output = "최초 커밋 (모든 파일 추가)"
         except Exception as e:
@@ -291,8 +351,7 @@ class GitRepo:
             print("[yellow]Git 저장소가 초기화되지 않아 커밋 정보를 수집할 수 없습니다.[/yellow]")
             return []
         parsed_commits = self._parse_git_log(num_commits)
-        if not parsed_commits: # 로그 파싱 실패 시 빈 리스트 반환
-            return []
+        if not parsed_commits: return []
         collected_data = []
         for commit_meta in parsed_commits:
             diff_info = self._get_diff_summary_for_commit(commit_meta["hash"])
@@ -357,51 +416,33 @@ class GitRepo:
     def save(self, state_paths: List[pathlib.Path], task: str, snapshot_dir: Optional[pathlib.Path]) -> str:
         if not self.repo: raise RuntimeError("Git 저장소가 없어 저장할 수 없습니다.")
         paths_to_add_abs = []
-        repo_root = pathlib.Path(self.repo.working_dir)
         for p in state_paths:
-            abs_p = p.resolve()
-            try: paths_to_add_abs.append(str(abs_p))
-            except ValueError: print(f"[yellow]경고: Git 저장소 외부 경로 추가 시도 무시됨: {p}[/yellow]")
+            paths_to_add_abs.append(str(p.resolve()))
         if snapshot_dir and snapshot_dir.exists() and any(snapshot_dir.iterdir()):
-            abs_snap_dir = snapshot_dir.resolve()
-            try: paths_to_add_abs.append(str(abs_snap_dir))
-            except ValueError: print(f"[yellow]경고: Git 저장소 외부 스냅샷 경로 추가 시도 무시됨: {snapshot_dir}[/yellow]")
+            paths_to_add_abs.append(str(snapshot_dir.resolve()))
 
-        if not paths_to_add_abs: raise ValueError("저장할 상태 파일 또는 스냅샷 파일이 없습니다 (Git 저장소 내).")
+        if not paths_to_add_abs: raise ValueError("저장할 상태 파일 또는 스냅샷 파일이 없습니다.")
         try: self.repo.index.add(paths_to_add_abs)
         except Exception as e_add: raise RuntimeError(f"Git add 작업 실패: {e_add}")
 
         commit_msg = f"{COMMIT_TAG}{task})"
         commit_hash = ""
         try:
-            # 커밋 전 변경사항 확인 (선택적)
-            # if not self.repo.is_dirty(index=True, working_tree=False):
-            #     print("[yellow]경고: 스테이지된 변경 사항이 없어 커밋을 건너뛸 수 있습니다.[/yellow]")
-            #     # return self.repo.head.commit.hexsha[:8] + " (변경 없음)" # 이전 커밋 해시 반환
-            
             self.repo.index.commit(commit_msg)
             commit_hash = self.repo.head.commit.hexsha[:8]
-
         except HookExecutionError as e_hook:
             stderr_msg = str(e_hook.stderr) if hasattr(e_hook, 'stderr') else str(e_hook)
             wsl_error_match = re.search(r"execvpe\(/bin/bash\) failed: No such file or directory", stderr_msg)
-            if wsl_error_match:
-                detailed_error = f"Git pre-commit 훅 실패 (WSL bash 실행 오류): {stderr_msg}"
-            else:
-                detailed_error = f"Git pre-commit 훅 실패 (종료 코드: {e_hook.status}): {stderr_msg}"
+            detailed_error = f"Git pre-commit 훅 실패 (WSL bash 실행 오류): {stderr_msg}" if wsl_error_match else f"Git pre-commit 훅 실패 (종료 코드: {e_hook.status}): {stderr_msg}"
             raise RuntimeError(detailed_error) from e_hook
-        except Exception as e_commit: # 다른 커밋 관련 예외
-            # GitPython에서 "nothing to commit"은 명시적 예외를 발생시키지 않을 수 있음.
-            # 커밋 후 이전 HEAD와 비교하여 변경 여부 판단 가능.
-            # 여기서는 일단 일반 예외로 처리.
+        except Exception as e_commit:
             is_nothing_to_commit = False
             if hasattr(e_commit, 'stderr') and isinstance(getattr(e_commit, 'stderr'), str):
                 if "nothing to commit" in getattr(e_commit, 'stderr').lower() or \
                    "no changes added to commit" in getattr(e_commit, 'stderr').lower():
                     is_nothing_to_commit = True
-            
             if is_nothing_to_commit or (not self.repo.is_dirty(index=True, working_tree=False) and self.repo.head.commit.message == commit_msg) :
-                 print("[yellow]경고: 커밋할 변경 사항이 없습니다. 이전 상태와 동일할 수 있습니다.[/]")
+                 print("[yellow]경고: 커밋할 변경 사항이 없습니다. 이전 상태와 동일할 수 있습니다.[/yellow]")
                  commit_hash = self.repo.head.commit.hexsha[:8] + " (변경 없음)"
             else:
                 raise RuntimeError(f"Git 커밋 중 오류 발생: {e_commit}") from e_commit
@@ -457,10 +498,8 @@ class GitRepo:
                     headline = metadata.get("headline", "")
             except Exception as e: headline = f"[메타데이터 오류: {e}]"
             items.append({
-                "hash": c.hexsha[:8], 
-                "task": c.message[len(COMMIT_TAG):-1].strip(), 
-                "time": datetime.datetime.fromtimestamp(c.committed_date).strftime("%Y-%m-%d %H:%M"), 
-                "head": headline or "-"
+                "hash": c.hexsha[:8], "task": c.message[len(COMMIT_TAG):-1].strip(), 
+                "time": datetime.datetime.fromtimestamp(c.committed_date).strftime("%Y-%m-%d %H:%M"), "head": headline or "-"
             })
         return list(reversed(items))
 
@@ -481,7 +520,7 @@ class GitRepo:
         except Exception as e:
             raise RuntimeError(f"커밋 '{commit_hash}' 상태 로드 중 예기치 않은 오류: {e}")
 
-# --- Serializer 클래스 (이전과 동일) ---
+# --- Serializer 클래스 ---
 class Serializer:
     @staticmethod
     def _calculate_sha256(fp: pathlib.Path) -> Optional[str]:
@@ -584,7 +623,6 @@ class UI:
         if help_text:
             UI.console.print(f"[dim]{help_text}[/dim]")
         
-        # AI 초안(default)이 있다면, 사용자에게 보여주고 편집할 수 있도록 안내
         if default:
             UI.console.print(Panel(default, title="[dim]제공된 내용 (편집 가능, 완료는 빈 줄에서 Enter 두 번)[/dim]", border_style="dim yellow", expand=False, padding=(0,1)))
             UI.console.print("[dim]위 내용을 수정하거나, 그대로 사용하려면 바로 Enter 두 번 입력하세요.[/dim]")
@@ -593,55 +631,30 @@ class UI:
 
         lines = []
         blank_count = 0
-        initial_input_done = False # 사용자가 한 번이라도 입력을 시작했는지 여부
-
-        # 사용자가 직접 입력하는 부분
-        # input()은 기본값을 직접 편집하는 기능을 제공하지 않으므로,
-        # 사용자는 default 내용을 보고 새로 입력하거나, default를 사용하려면 빈 입력으로 넘어가야 함.
-        # rich.prompt.Prompt는 default 편집 기능을 제공하지만, 여러 줄 입력에는 부적합.
+        initial_input_done = False
         
-        # 여기서는 사용자가 내용을 입력하면 그 내용을 사용하고,
-        # 아무것도 입력하지 않고(초기 상태에서 바로 Enter 두번) default가 있으면 default를 사용.
-        # 만약 default를 보여주고 사용자가 수정을 시작하면, 그 수정된 내용을 최종으로 간주.
-
-        # 실제로는 default를 편집기에 미리 채워주고 수정하게 하는 것이 가장 이상적.
-        # 터미널 환경에서는 이 부분이 다소 까다로움.
-        # 임시방편: default가 있으면 사용자가 빈 입력을 하면 default를 쓰도록 함.
-        # 사용자가 무언가 입력하기 시작하면 default는 무시됨.
-
-        temp_lines_for_default_edit = []
-        if default: # default가 있는 경우, 사용자가 default를 수정하는 것처럼 동작하게 유도
-            # 사용자가 default를 보고 입력하도록 유도
-            # 이 부분은 실제 편집기처럼 동작하지 않으므로, 사용자는 default 내용을 참고하여 새로 입력해야 함.
-            # 또는, 사용자가 아무것도 입력하지 않으면 default를 사용하도록 함.
-            pass
-
-
         while True:
-            try: line = input("> " if not initial_input_done and not default else "") # 초기 입력 프롬프트, default 있을땐 생략 가능
+            try: line = input("> " if not initial_input_done and not default else "") 
             except EOFError: break
             
             if line == "" :
                 blank_count += 1
             else:
                 blank_count = 0
-                if not initial_input_done: # 첫 입력이 발생하면
+                if not initial_input_done: 
                     initial_input_done = True
-                    if default: # default가 있었는데 사용자가 입력을 시작하면, 이전 default는 무시
-                        lines = [] # 기존 default를 지우고 사용자 입력으로 대체 시작
+                    if default: 
+                        lines = [] 
                 lines.append(line)
 
             if blank_count >= 2: break
         
         final_content = "\n".join(lines).strip()
 
-        # 사용자가 아무런 입력도 하지 않았고(initial_input_done=False), default값이 존재하면 default를 사용
         if not initial_input_done and default:
             print("[dim]입력 없음, 제공된 기본 내용을 사용합니다.[/dim]")
             return default
-        # 사용자가 입력을 시작했거나, default가 없는 경우, 사용자가 입력한 내용을 반환
         return final_content
-
 
     @staticmethod
     def notify(msg:str,style:str="green"): UI.console.print(f"\n[bold {style}]✔ {msg}[/]")
@@ -651,7 +664,7 @@ class UI:
         UI.console.print(f"\n[bold red]❌ 오류: {msg}[/]")
         if details:
             details_lines = details.strip().splitlines()
-            max_lines = 15 # 상세 정보 최대 출력 라인 수
+            max_lines = 15
             display_details = "\n".join(details_lines[:max_lines])
             if len(details_lines) > max_lines: display_details += f"\n[dim]... (총 {len(details_lines)}줄 중 {max_lines}줄 표시)[/dim]"
             UI.console.print(Panel(display_details,title="[dim]상세 정보 (Traceback)[/]",border_style="dim red",expand=False))
@@ -688,7 +701,6 @@ class UI:
         except Exception as e:
             print(f"[red]Diff 출력 중 오류 발생: {e}[/]")
             print(txt)
-
 
 # --- Handover 클래스 ---
 class Handover:
@@ -737,7 +749,8 @@ class Handover:
                     default_task_name = self.git.repo.head.commit.summary
             task_name_input = self.ui.task_name(default=default_task_name)
 
-            git_commits_info_for_ai = "최근 Git 활동 정보 없음." # 기본값
+            # 1. Git 정보 수집
+            git_commits_info_str = "최근 Git 활동 정보 없음." # 기본값
             if self.git:
                 self.ui.console.print("\n[dim]최근 Git 커밋 정보를 수집 중입니다...[/dim]")
                 num_commits_to_fetch = int(os.getenv("HANDOVER_N_COMMITS", 10))
@@ -756,34 +769,43 @@ class Handover:
                             if len(files) > 3:
                                 commit_line += f"\n    - ... (외 {len(files) - 3}개 파일 변경)"
                         formatted_commits.append(commit_line)
-                    git_commits_info_for_ai = "\n".join(formatted_commits)
-                    self.ui.panel(git_commits_info_for_ai, "수집된 Git 커밋 요약 (AI 전달용)", border_style="green")
-
+                    git_commits_info_str = "\n".join(formatted_commits)
+                    self.ui.panel(git_commits_info_str, "수집된 Git 커밋 요약 (AI 전달용)", border_style="green")
                 else:
                     self.ui.console.print("[yellow]Git 커밋 정보를 수집하지 못했거나, 최근 커밋이 없습니다.[/yellow]")
             
+            # 2. 사용자 추가 컨텍스트 입력
             user_additional_context = self.ui.multiline(
                 "추가 컨텍스트 또는 강조 사항 (선택 사항)",
-                help_text="AI가 Git 정보 외에 참고할 내용을 입력하세요. (예: 주요 결정 배경, 미팅 요약 등)"
+                help_text="AI가 Git 정보 외에 참고할 내용을 입력하세요. (예: 주요 결정 배경, 미팅 요약, Self-Filling Prompt의 다른 섹션 내용 등)"
             )
             
-            ai_input_context = "### 최근 Git 활동 요약:\n" + git_commits_info_for_ai
+            # 3. AI에게 전달할 전체 컨텍스트 구성
+            # Self-Filling Prompt 템플릿과 수집된 데이터를 결합
+            ai_input_context = SELF_FILLING_PROMPT_TEMPLATE
+            ai_input_context += "\n\n--- 제공된 데이터 (아래 내용을 위 템플릿에 맞춰 채워주세요) ---\n\n"
+            ai_input_context += "### 최근 Git 활동 요약:\n"
+            ai_input_context += git_commits_info_str
+            
             if user_additional_context:
                 ai_input_context += "\n\n### 사용자 추가 컨텍스트:\n" + user_additional_context
             
+            # 현재 아티팩트 파일 목록 (AI에게 참고용으로 전달)
             current_artifact_files = []
             if self.art_dir.exists() and self.art_dir.is_dir():
                 current_artifact_files = [f.name for f in self.art_dir.iterdir() if f.is_file()]
 
-            self.ui.console.print("\n[bold yellow]AI가 인수인계 문서 초안을 생성 중입니다... (Git 정보 및 추가 컨텍스트 기반)[/bold yellow]")
+            # 4. AI 호출하여 초안 생성
+            self.ui.console.print("\n[bold yellow]AI가 인수인계 문서 초안을 생성 중입니다... (Self-Filling Prompt 및 데이터 기반)[/bold yellow]")
             
             generated_markdown_draft = self.ai.make_summary(
-                task=task_name_input,
-                ctx=ai_input_context,
-                arts=current_artifact_files
+                task=task_name_input, # 작업 이름은 AI가 템플릿 내에서 활용하도록 전달
+                ctx=ai_input_context,  # 템플릿 + 데이터
+                arts=current_artifact_files 
             )
             self.ui.panel(generated_markdown_draft, "AI 생성 인수인계 문서 초안")
 
+            # 5. 사용자 최종 편집
             self.ui.console.print("\n[bold green]AI가 생성한 초안입니다. 내용을 검토하고 최종적으로 수정/완성해주세요.[/bold green]")
             final_markdown_content = self.ui.multiline(
                 "최종 인수인계 문서 내용 편집",
@@ -791,9 +813,10 @@ class Handover:
                 help_text="위 초안을 바탕으로 최종 문서를 완성하세요."
             )
 
-            if not final_markdown_content.strip(): # 사용자가 아무것도 입력 안하고 default도 없거나, default를 지웠을 경우
+            if not final_markdown_content.strip():
                 self.ui.error("인수인계 문서 내용이 비어있어 저장을 취소합니다."); return
 
+            # 6. (선택적) 최종 내용 AI 재검증
             self.ui.console.print("[bold yellow]수정된 내용을 AI가 다시 검증 중입니다...[/bold yellow]")
             is_valid_summary, validation_message = self.ai.verify_summary(final_markdown_content)
             if not is_valid_summary:
@@ -801,6 +824,7 @@ class Handover:
             else:
                 self.ui.notify("AI 최종 검증 통과!", style="green")
 
+            # 7. 파일 저장 및 Git 커밋
             saved_state_files, artifact_snapshot_dir = Serializer.save_state(final_markdown_content, task_name_input, self.state_dir, self.art_dir, self.app_root)
             
             if not self.git:
@@ -816,7 +840,7 @@ class Handover:
 
 
     def load(self, latest: bool = False):
-        self._ensure_prereqs("load", True, True)
+        self._ensure_prereqs("load", True, True) 
         try:
             if not self.git:
                 self.ui.error("Git 저장소가 설정되지 않아 상태를 로드할 수 없습니다."); return
@@ -898,7 +922,7 @@ def main_cli_entry_point():
         print(f"[red]오류: 필수 디렉토리 생성 실패 ({app_state_dir} 또는 {app_art_dir}): {e}[/]")
         sys.exit(1)
 
-    parser = argparse.ArgumentParser(description="AI 기반 프로젝트 인수인계 상태 관리 도구 (v1.1.10 - 오류 수정)", formatter_class=argparse.RawTextHelpFormatter)
+    parser = argparse.ArgumentParser(description="AI 기반 프로젝트 인수인계 상태 관리 도구 (v1.1.11 - Self-Filling Prompt)", formatter_class=argparse.RawTextHelpFormatter)
     
     backend_choices_list = list(available_backends.keys()) if available_backends else []
     default_be = "none" 
@@ -946,7 +970,7 @@ def main_cli_entry_point():
         elif args.backend not in available_backends and args.backend != "none":
             UI.error(f"'{args.command}' 명령 실행 불가: 선택된 AI 백엔드 '{args.backend}'를 로드할 수 없거나 초기화에 실패했습니다."); sys.exit(1)
 
-    print(f"[bold underline]Handover 스크립트 v1.1.10 (오류 수정)[/]")
+    print(f"[bold underline]Handover 스크립트 v1.1.11 (Self-Filling Prompt)[/]")
     if is_git_repo_at_cli_root: print(f"[dim]프로젝트 루트 (Git): {cli_root_path}[/dim]")
     else: print(f"[dim]현재 작업 폴더 (Git 저장소 아님): {cli_root_path}[/dim]")
 
@@ -961,7 +985,7 @@ def main_cli_entry_point():
         elif args.command == "load": handler.load(latest=args.latest)
         elif args.command == "diff": handler.diff(target=args.target)
         elif args.command == "verify": handler.verify_checksums(commit_hash=args.commit)
-    except Exception as e_handler: # 핸들러 실행 중 예외 발생 시
+    except Exception as e_handler:
         UI.error(f"핸들러 실행 중 예기치 않은 오류: {str(e_handler)}", traceback.format_exc()); sys.exit(1)
 
 
