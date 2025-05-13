@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# handover.py – 인수인계 v1.2.1 (수동 작성 모드, 로드 로직 수정)
+# handover.py – 인수인계 v1.2.2 (수동 작성 모드, 로드 및 타임존 로직 수정)
 
 from __future__ import annotations
 import os
@@ -100,8 +100,9 @@ class Serializer:
 
     @staticmethod
     def save_state(md: str, task: str, current_app_state_dir: pathlib.Path, current_app_art_dir: pathlib.Path, current_app_root: pathlib.Path) -> Tuple[List[pathlib.Path], Optional[pathlib.Path]]:
-        # _sanitize_task_name 사용하도록 수정
-        ts = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+        # UTC 시간 기준으로 타임스탬프 생성하도록 수정
+        # ts = datetime.datetime.now().strftime("%Y%m%dT%H%M%S") # 기존 로컬 시간 기준
+        ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S") # *** UTC 시간 기준 ***
         safe_task = Serializer._sanitize_task_name(task) # 분리된 메서드 사용
         base_fn = f"{ts}_{safe_task}" # 길이 제한은 sanitize에서 처리
 
@@ -149,6 +150,7 @@ class Serializer:
                         except Exception as copy_e: print(f"[yellow]경고: 아티팩트 파일 '{f_art.name}' 복사/해시 실패: {copy_e}[/]")
 
         headline = Serializer._extract_headline(md, task)
+        # 메타데이터에는 task 이름과 UTC 타임스탬프 문자열 저장
         meta = {"task":task,"ts":ts,"headline":headline,"artifact_checksums":checksums}
         try: meta_f.write_text(json.dumps(meta,ensure_ascii=False,indent=2),encoding="utf-8")
         except IOError as e: raise RuntimeError(f"메타데이터 파일 저장 실패 ({meta_f}): {e}") from e
@@ -162,7 +164,7 @@ class Serializer:
         return paths_to_commit, valid_snap_dir
 
 
-# --- GitRepo 클래스 (로드 로직 수정) ---
+# --- GitRepo 클래스 (로드 로직 수정됨 - 이전 버전과 동일하게 유지) ---
 class GitRepo:
     def __init__(self, repo_path: pathlib.Path):
         # 변경 없음
@@ -417,30 +419,35 @@ class GitRepo:
         """주어진 커밋 내에서 커밋 시간과 가장 가까운 .meta.json 파일을 찾아 반환"""
         if not self.repo: return None
 
-        commit_dt = datetime.datetime.fromtimestamp(commit.committed_date, tz=datetime.timezone.utc)
+        # 커밋 시간을 UTC로 가져옴 (timezone aware)
+        commit_dt_utc = datetime.datetime.fromtimestamp(commit.committed_date, tz=datetime.timezone.utc)
         best_meta_blob: Optional[Blob] = None
         best_meta_data: Optional[Dict] = None
         min_time_diff = float('inf')
 
         try:
             for item in commit.tree.traverse():
+                # 경로와 확장자 확인
                 if isinstance(item, Blob) and \
                    item.path.startswith(search_rel_path_str) and \
                    item.path.endswith(".meta.json"):
                     try:
+                        # 메타데이터 파싱
                         metadata = json.loads(item.data_stream.read().decode('utf-8'))
                         meta_ts_str = metadata.get("ts")
                         if not meta_ts_str: continue # 타임스탬프 없으면 건너뜀
 
+                        # 메타데이터 타임스탬프 파싱 (naive datetime)
                         meta_dt = parse_ts_str_to_datetime(meta_ts_str)
                         if not meta_dt:
-                            print(f"[yellow]경고: 메타데이터 파일 '{item.path}'의 타임스탬프 형식 오류 무시됨 ('{meta_ts_str}').[/]")
+                            # print(f"[yellow]경고: 메타데이터 파일 '{item.path}'의 타임스탬프 형식 오류 무시됨 ('{meta_ts_str}').[/]")
                             continue
 
-                        # 시간대 인식 datetime 객체로 통일 (UTC 기준 비교)
-                        meta_dt_utc = meta_dt.replace(tzinfo=datetime.timezone.utc) if meta_dt.tzinfo is None else meta_dt.astimezone(datetime.timezone.utc)
-                        commit_dt_utc = commit_dt # 이미 timezone aware
+                        # 메타데이터 시간을 UTC로 간주하여 timezone aware 객체 생성
+                        # (Serializer.save_state에서 UTC로 저장했으므로 이 가정이 맞음)
+                        meta_dt_utc = meta_dt.replace(tzinfo=datetime.timezone.utc)
 
+                        # 시간 차이 계산 (UTC 기준)
                         time_diff = abs((commit_dt_utc - meta_dt_utc).total_seconds())
 
                         # 가장 시간 차이가 적은 메타데이터 선택
@@ -450,18 +457,20 @@ class GitRepo:
                             best_meta_data = metadata
 
                     except json.JSONDecodeError:
-                        print(f"[yellow]경고: 메타데이터 파일 '{item.path}' 파싱 오류 무시됨.[/]")
+                        # print(f"[yellow]경고: 메타데이터 파일 '{item.path}' 파싱 오류 무시됨.[/]")
                         continue
                     except Exception as e_inner:
-                        print(f"[yellow]경고: 메타데이터 처리 중 예상치 못한 오류 ({item.path}): {e_inner}[/]")
+                        # print(f"[yellow]경고: 메타데이터 처리 중 예상치 못한 오류 ({item.path}): {e_inner}[/]")
                         continue
         except Exception as e_traverse:
             print(f"[yellow]경고: 커밋 {commit.hexsha[:7]} 트리 탐색 중 오류: {e_traverse}[/]")
             return None # 탐색 중 오류 발생 시 포기
 
-        # 너무 큰 시간 차이는 무시 (예: 10분 이상 차이나면 잘못된 파일일 가능성)
-        if min_time_diff > 600:
-             print(f"[yellow]경고: 커밋 {commit.hexsha[:7]} 시간과 가장 가까운 메타데이터의 시간 차이가 너무 큽니다 ({min_time_diff:.0f}초). 관련 없는 파일일 수 있습니다.[/]")
+        # 시간 차이 경고 (필요시 임계값 조정 가능)
+        # 이전 버전에서는 이 경고가 타임존 오류 때문에 많이 발생했을 수 있음
+        # 타임존 수정 후에는 정상적인 경우 이 경고가 거의 발생하지 않아야 함
+        if best_meta_blob and min_time_diff > 60: # 임계값을 60초로 줄여봄
+             print(f"[yellow dim]참고: 커밋 {commit.hexsha[:7]} 시간과 메타데이터 시간 차이: {min_time_diff:.0f}초[/]")
              # 필요하다면 여기서 None을 반환하여 아예 못 찾은 것으로 처리할 수도 있음
              # return None
              pass # 일단은 찾은 것으로 간주
@@ -497,7 +506,8 @@ class GitRepo:
 
             if meta_result:
                 _, metadata = meta_result
-                headline = metadata.get("headline", "[헤드라인 없음]") # 메타데이터에서 헤드라인 추출
+                # 메타데이터에서 헤드라인 추출 (없으면 task_name 사용 시도)
+                headline = metadata.get("headline") or metadata.get("task", "[헤드라인/작업명 없음]")
             else:
                  # 메타데이터 못찾으면 경고성 헤드라인 사용 가능
                  headline = "[관련 메타파일 없음]"
@@ -505,7 +515,7 @@ class GitRepo:
             items.append({
                 "hash": c.hexsha[:8],
                 "task": task_name, # 커밋 메시지의 task 사용
-                "time": datetime.datetime.fromtimestamp(c.committed_date).strftime("%Y-%m-%d %H:%M"),
+                "time": datetime.datetime.fromtimestamp(c.committed_date).strftime("%Y-%m-%d %H:%M"), # 표시 시간은 로컬 기준
                 "head": headline
             })
         return items # 최신 커밋이 앞에 오도록 반환 (iter_commits 결과 순서)
@@ -514,7 +524,8 @@ class GitRepo:
         """주어진 커밋 해시에 해당하는 정확한 상태(.md) 파일 내용을 로드"""
         if not self.repo: raise RuntimeError("Git 저장소가 없어 로드할 수 없습니다.")
         try:
-            commit_obj = self.repo.commit(commit_hash)
+            # 전체 해시로 커밋 객체 가져오기 (필요시 rev_parse 사용)
+            commit_obj = self.repo.commit(self.repo.git.rev_parse(commit_hash))
         except Exception as e:
             raise RuntimeError(f"커밋 '{commit_hash}' 접근 오류: {e}") from e
 
@@ -530,35 +541,34 @@ class GitRepo:
 
         _, metadata = meta_result
         state_ts_str = metadata.get("ts")
-        state_task = metadata.get("task")
+        # state_task = metadata.get("task") # 메타데이터의 task보다 커밋 메시지의 task가 더 신뢰도 높을 수 있음
+                                           # 파일명 생성에는 메타데이터의 task 사용 (원래 생성 시 사용된 이름)
+        state_task_for_filename = metadata.get("task")
 
-        if not state_ts_str or not state_task:
+
+        if not state_ts_str or not state_task_for_filename:
              raise RuntimeError(f"커밋 '{commit_hash}'의 메타데이터 파일에서 'ts' 또는 'task' 정보를 읽을 수 없습니다.")
 
         # 2. 메타데이터 정보로 정확한 .md 파일 경로 구성
-        safe_task = Serializer._sanitize_task_name(state_task)
+        safe_task = Serializer._sanitize_task_name(state_task_for_filename)
         expected_md_filename = f"{state_ts_str}_{safe_task}.md"
         expected_md_path_str = (pathlib.Path(search_rel_path_str) / expected_md_filename).as_posix()
 
         # 3. 해당 경로의 .md 파일 찾기
         try:
+            # GitPython의 tree 객체에서 직접 경로로 접근 시도
             md_blob = commit_obj.tree / expected_md_path_str
             if isinstance(md_blob, Blob):
                 return md_blob.data_stream.read().decode('utf-8')
-            else:
-                 # tree['path'] 방식이 실패할 경우 대비 traverse 방식 추가 시도 (선택적)
-                 for item in commit_obj.tree.traverse():
-                      if isinstance(item, Blob) and item.path == expected_md_path_str:
-                           return item.data_stream.read().decode('utf-8')
-                 raise FileNotFoundError() # 최종적으로 못찾음
+            else: # 위 방식이 실패하면 traverse로 다시 시도 (안전장치)
+                 raise KeyError # KeyError를 발생시켜 아래 except 블록으로 이동
 
-        except KeyError: # tree['path'] 방식 실패 시
-             # traverse 방식 시도
+        except KeyError: # tree['path'] 방식 실패 시 또는 위에서 강제 발생시킨 경우
+             # traverse 방식으로 다시 시도
              for item in commit_obj.tree.traverse():
                   if isinstance(item, Blob) and item.path == expected_md_path_str:
                        return item.data_stream.read().decode('utf-8')
-             raise RuntimeError(f"커밋 '{commit_hash}' 내에서 예상 경로 '{expected_md_path_str}'의 상태 파일(.md)을 찾을 수 없습니다.")
-        except FileNotFoundError:
+             # 최종적으로 못 찾은 경우
              raise RuntimeError(f"커밋 '{commit_hash}' 내에서 예상 경로 '{expected_md_path_str}'의 상태 파일(.md)을 찾을 수 없습니다.")
         except Exception as e:
             raise RuntimeError(f"커밋 '{commit_hash}' 상태 로드 중 예기치 않은 오류 ({expected_md_path_str}): {e}") from e
@@ -661,7 +671,13 @@ class Handover:
                 if current_branch_name and not current_branch_name.startswith("DETACHED_HEAD"):
                     default_task_name = current_branch_name
                 elif self.git.repo.head.is_valid() and self.git.repo.head.commit:
-                    default_task_name = self.git.repo.head.commit.summary
+                    # 마지막 커밋 메시지에서 'state(...)' 제외하고 기본값으로 사용 시도
+                    last_commit_msg = self.git.repo.head.commit.summary
+                    if not last_commit_msg.startswith(COMMIT_TAG):
+                        default_task_name = last_commit_msg
+                    else: # state 커밋이면 브랜치 이름이나 기본값 사용
+                        pass # default_task_name 유지
+
             task_name_input = self.ui.task_name(default=default_task_name)
 
             if self.git:
@@ -745,6 +761,7 @@ class Handover:
 
         self.ui.console.print(f"\n[dim]커밋 {commit_hash}의 저장된 아티팩트 체크섬 정보를 표시합니다.[/]")
         try:
+            # 전체 해시로 커밋 객체 가져오기
             commit_obj = self.git.repo.commit(self.git.repo.git.rev_parse(commit_hash))
             state_dir_rel_path_str = self.git._get_relative_path_str(self.state_dir)
             if not state_dir_rel_path_str:
@@ -769,7 +786,7 @@ class Handover:
         except Exception as e: self.ui.error(f"체크섬 정보 로드/표시 중 오류 ({commit_hash}): {str(e)}", traceback.format_exc())
 
 
-# --- 스크립트 진입점 (변경 없음) ---
+# --- 스크립트 진입점 (버전 업데이트) ---
 def main_cli_entry_point():
     cli_root_path = pathlib.Path('.').resolve()
     is_git_repo_at_cli_root = False
@@ -793,7 +810,7 @@ def main_cli_entry_point():
         print(f"[red]오류: 필수 디렉토리 생성 실패 ({app_state_dir} 또는 {app_art_dir}): {e}[/]")
         sys.exit(1)
 
-    parser = argparse.ArgumentParser(description="프로젝트 인수인계 상태 관리 도구 (v1.2.1 - 수동 모드)", formatter_class=argparse.RawTextHelpFormatter)
+    parser = argparse.ArgumentParser(description="프로젝트 인수인계 상태 관리 도구 (v1.2.2 - 수동 모드, 로드/타임존 수정)", formatter_class=argparse.RawTextHelpFormatter) # 버전 업데이트
     subparsers = parser.add_subparsers(dest="command", help="실행할 작업", required=True)
 
     cmd_configs = [("save", "현재 작업 상태를 수동으로 작성하여 저장", True),
@@ -818,7 +835,7 @@ def main_cli_entry_point():
     if git_needed and not is_git_repo_at_cli_root:
         UI.error(f"'{args.command}' 명령은 Git 저장소 내에서 실행해야 합니다. (현재 위치는 Git 저장소가 아님: {pathlib.Path('.').resolve()})"); sys.exit(1)
 
-    print(f"[bold underline]Handover 스크립트 v1.2.1 (수동 모드, 로드 로직 수정)[/]")
+    print(f"[bold underline]Handover 스크립트 v1.2.2 (수동 모드, 로드/타임존 수정)[/]") # 버전 업데이트
     if is_git_repo_at_cli_root: print(f"[dim]프로젝트 루트 (Git): {cli_root_path}[/dim]")
     else: print(f"[dim]현재 작업 폴더 (Git 저장소 아님): {cli_root_path}[/dim]")
 
